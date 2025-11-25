@@ -30,8 +30,8 @@ ROOT_DATA_DIR = PROJECT_ROOT / "data"
 # DATASET PARAMETERS
 HR_SIZE = 512          # Hubble Patch Size
 AI_LR_SIZE = 128       # Fixed output size for AI (Input)
-STRIDE = 32            # High overlap (approx 90%) for Data Augmentation
-MIN_COVERAGE = 0.50    # Relaxed threshold to accept clean edges
+STRIDE = 64           # High overlap (approx 90%) for Data Augmentation
+MIN_COVERAGE = 0.95    # Relaxed threshold to accept clean edges
 MIN_PIXEL_VALUE = 0.0001 
 
 # DEBUG PARAMETERS
