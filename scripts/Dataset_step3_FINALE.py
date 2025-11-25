@@ -50,8 +50,8 @@ ROOT_DATA_DIR = PROJECT_ROOT / "data"
 
 # PARAMETRI DATASET (MASSIMIZZAZIONE DATI)
 HR_SIZE = 512         
-LR_SIZE = 80          
-STRIDE = 16         # <--- STRIDE BASSO PER MOLTE PATCH
+LR_SIZE = 128          
+STRIDE = 32         # <--- STRIDE BASSO PER MOLTE PATCH
 
 # SOGLIE DI QUALITÀ
 MIN_COVERAGE = 0.97      # <--- TOLLERANZA ALTA (accetta un po' di bordo nero)
