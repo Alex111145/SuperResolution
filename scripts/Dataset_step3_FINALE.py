@@ -1,10 +1,16 @@
 """
-STEP 3 (FINAL): ESTRAZIONE PATCH TURBO + CLEAN DEBUG + ZIP
+STEP 3 (FINAL): ESTRAZIONE PATCH TURBO + CONTEXT MAP + ZIP
 ------------------------------------------------------------------------
-VERSIONE DEFINITIVA PER TRAINING 4x:
-- Dimensioni: Input 128px -> Output 512px.
-- Logica: File-Centric (Veloce) + Filtro Sovrapposizione (Preciso).
-- Output: Dataset pronto e ZIP per debug visivo.
+AGGIORNAMENTI:
+- 4° Pannello nei Debug: Mappa completa di Hubble con rettangolo rosso tratteggiato
+  che indica la posizione della patch.
+- Rimosso i cerchi gialli (Clean Debug).
+- Ottimizzazione File-Centric (Veloce).
+- ZIP AUTOMATICO alla fine.
+
+INPUT:  data/TARGET/3_registered_native/...
+OUTPUT: data/TARGET/6_patches_final/...
+        data/TARGET/visual_debug_TARGETNAME.zip
 ------------------------------------------------------------------------
 """
 
@@ -15,6 +21,7 @@ import numpy as np
 import matplotlib
 matplotlib.use('Agg') 
 import matplotlib.pyplot as plt
+import matplotlib.patches as patches
 from pathlib import Path
 from astropy.io import fits
 from astropy.wcs import WCS
@@ -33,13 +40,13 @@ CURRENT_SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = CURRENT_SCRIPT_DIR.parent
 ROOT_DATA_DIR = PROJECT_ROOT / "data"
 
-# --- PARAMETRI (Rapporto 4x) ---
-HR_SIZE = 512          # Hubble Patch (Target)
-AI_LR_SIZE = 128       # Obs Patch (Input) -> 512 / 4 = 128
-STRIDE = 64            # Sovrapposizione (64px è un buon compromesso velocità/quantità)
-MIN_COVERAGE = 0.95    # Qualità alta (scarta se >5% è nero)
+# --- PARAMETRI ---
+HR_SIZE = 512          # Hubble Patch
+AI_LR_SIZE = 128       # Obs Patch (512 / 4)
+STRIDE = 32            # Sovrapposizione
+MIN_COVERAGE = 0.95    # Qualità alta (max 5% nero)
 MIN_PIXEL_VALUE = 0.0001 
-DEBUG_SAMPLES = 999999 # Salva tutti i debug per lo zip
+DEBUG_SAMPLES = 999999 # Salva TUTTI i debug
 
 # --- MEMORIA CONDIVISA WORKER ---
 shared_hubble = {}
@@ -60,41 +67,63 @@ def normalize_local_stretch(data):
         return np.sqrt(np.clip((d - vmin) / (vmax - vmin), 0, 1))
     except: return np.zeros_like(data)
 
-def save_clean_debug_png(patch_h, patch_o_lr, idx, save_dir):
-    """Salva PNG pulito senza cerchi gialli"""
+def save_debug_with_context(patch_h, patch_o_lr, idx, save_dir, hx, hy):
+    """
+    Salva PNG con 4 pannelli: HR, LR, Overlay e Mappa di Contesto.
+    """
     try:
-        fig, ax = plt.subplots(1, 3, figsize=(15, 5))
+        # Layout: 4 colonne
+        fig, ax = plt.subplots(1, 4, figsize=(20, 5))
         
         h_v = normalize_local_stretch(patch_h)
         o_v = normalize_local_stretch(patch_o_lr)
         
-        # 1. Hubble
+        # 1. Hubble Patch
         ax[0].imshow(h_v, origin='lower', cmap='inferno')
-        ax[0].set_title(f"Hubble HR (512px)")
+        ax[0].set_title(f"Hubble HR ({HR_SIZE}px)")
         ax[0].axis('off')
 
-        # 2. Osservatorio
+        # 2. Osservatorio Patch
         ax[1].imshow(o_v, origin='lower', cmap='viridis')
-        ax[1].set_title(f"Obs LR (128px)")
+        ax[1].set_title(f"Obs LR ({AI_LR_SIZE}px)")
         ax[1].axis('off')
 
         # 3. Overlay
         o_rez = resize(o_v, (HR_SIZE, HR_SIZE), order=0)
         rgb = np.zeros((HR_SIZE, HR_SIZE, 3))
-        rgb[..., 0] = h_v       # Rosso
-        rgb[..., 1] = o_rez     # Verde
-        
+        rgb[..., 0] = h_v
+        rgb[..., 1] = o_rez
         ax[2].imshow(rgb, origin='lower')
-        ax[2].set_title("Overlay (Giallo=Match)")
+        ax[2].set_title("Match (Rosso+Verde=Giallo)")
         ax[2].axis('off')
+
+        # 4. MAPPA DI CONTESTO (Hubble intera con box)
+        preview = shared_hubble['preview']
+        ds = shared_hubble['preview_ds'] # Fattore di downsample
+        
+        ax[3].imshow(preview, origin='lower', cmap='gray')
+        ax[3].set_title("Posizione Patch")
+        ax[3].axis('off')
+        
+        # Disegna il rettangolo "rotto" (tratteggiato)
+        # Coordinate scalate in base al downsample
+        rect_x = hx / ds
+        rect_y = hy / ds
+        rect_w = HR_SIZE / ds
+        rect_h = HR_SIZE / ds
+        
+        rect = patches.Rectangle((rect_x, rect_y), rect_w, rect_h, 
+                                 linewidth=2, edgecolor='red', facecolor='none', 
+                                 linestyle='--') # <-- Questo fa il "quadrato rotto"
+        ax[3].add_patch(rect)
 
         plt.tight_layout()
         plt.savefig(save_dir / f"check_{idx:05d}.jpg", dpi=80)
         plt.close(fig)
-    except: pass
+    except Exception as e:
+        pass
 
 def create_lr_wcs_centered(hr_wcs, lr_size, fov_deg):
-    """Crea WCS LR centrato su Hubble per allineamento perfetto"""
     center_world = hr_wcs.pixel_to_world(HR_SIZE/2, HR_SIZE/2)
     w = WCS(naxis=2)
     w.wcs.ctype = ["RA---TAN", "DEC--TAN"]
@@ -105,9 +134,10 @@ def create_lr_wcs_centered(hr_wcs, lr_size, fov_deg):
     w.wcs.pc = np.eye(2)
     return w
 
-# ================= WORKER LOGIC (TURBO) =================
+# ================= WORKER LOGIC =================
 
-def init_worker(d_h, w_h, h_fov, out_fits, out_png, grid_coords, grid_indices, counter, lock):
+def init_worker(d_h, w_h, h_fov, out_fits, out_png, grid_coords, grid_indices, counter, lock, preview, preview_ds):
+    # Salva i dati condivisi nel processo
     shared_hubble['data'] = d_h
     shared_hubble['wcs'] = w_h
     shared_hubble['fov'] = h_fov
@@ -116,6 +146,10 @@ def init_worker(d_h, w_h, h_fov, out_fits, out_png, grid_coords, grid_indices, c
     shared_hubble['grid_coords'] = grid_coords
     shared_hubble['grid_indices'] = grid_indices
     
+    # Dati per la mappa di contesto
+    shared_hubble['preview'] = preview
+    shared_hubble['preview_ds'] = preview_ds
+    
     global global_counter, global_lock
     global_counter = counter
     global_lock = lock
@@ -123,7 +157,6 @@ def init_worker(d_h, w_h, h_fov, out_fits, out_png, grid_coords, grid_indices, c
 def process_observatory_file(obs_path):
     saved_count = 0
     try:
-        # 1. Carica File Osservatorio una volta sola
         with fits.open(obs_path) as hdul:
             data_o = np.nan_to_num(hdul[0].data)
             if data_o.ndim > 2: data_o = data_o[0]
@@ -131,12 +164,11 @@ def process_observatory_file(obs_path):
             
         oh, ow = data_o.shape[-2:]
         
-        # 2. Filtro Vettoriale (Sovrapposizione)
+        # Filtro Vettoriale
         world_coords = shared_hubble['grid_coords']
         pix_coords = wcs_o.wcs_world2pix(world_coords, 0)
         
         margin = 128 
-        # Seleziona le patch Hubble che cadono dentro questa immagine Obs
         valid_mask = (pix_coords[:,0] > -margin) & (pix_coords[:,0] < ow + margin) & \
                      (pix_coords[:,1] > -margin) & (pix_coords[:,1] < oh + margin)
         valid_idxs = np.where(valid_mask)[0]
@@ -147,7 +179,6 @@ def process_observatory_file(obs_path):
         h_wcs = shared_hubble['wcs']
         h_fov = shared_hubble['fov']
         
-        # 3. Estrazione
         for i in valid_idxs:
             hy, hx = shared_hubble['grid_indices'][i]
             
@@ -156,7 +187,6 @@ def process_observatory_file(obs_path):
             if np.count_nonzero(patch_h > MIN_PIXEL_VALUE) / patch_h.size < MIN_COVERAGE:
                 continue
 
-            # Crea LR corrispondente
             h_local_wcs = h_wcs.deepcopy()
             h_local_wcs.wcs.crpix -= np.array([hx, hy])
             
@@ -170,7 +200,6 @@ def process_observatory_file(obs_path):
             if np.count_nonzero(patch_o_lr > MIN_PIXEL_VALUE) < (AI_LR_SIZE**2 * MIN_COVERAGE):
                 continue
                 
-            # Salvataggio
             with global_lock:
                 pair_id = global_counter.value
                 global_counter.value += 1
@@ -184,7 +213,8 @@ def process_observatory_file(obs_path):
             saved_count += 1
             
             if pair_id < DEBUG_SAMPLES:
-                save_clean_debug_png(patch_h, patch_o_lr, pair_id, shared_hubble['out_png'])
+                # Passiamo hx, hy per disegnare il quadrato sulla mappa
+                save_debug_with_context(patch_h, patch_o_lr, pair_id, shared_hubble['out_png'], hx, hy)
                 
     except Exception: return 0
     return saved_count
@@ -192,7 +222,7 @@ def process_observatory_file(obs_path):
 # ================= MAIN =================
 
 def main():
-    print(f"\n🚀 GENERATORE DATASET TURBO 4x (Clean + ZIP)")
+    print(f"\n🚀 GENERATORE DATASET 4x (Context Map + ZIP)")
     print(f"   HR: {HR_SIZE}px | LR: {AI_LR_SIZE}px | Stride: {STRIDE}")
     
     try:
@@ -217,7 +247,7 @@ def main():
     if out_png.exists(): shutil.rmtree(out_png)
     out_png.mkdir(parents=True)
 
-    # Carica Hubble Master
+    # Carica Hubble
     h_files = sorted(list(path_h.glob("*.fit*")))
     if not h_files: return print("❌ Nessun file Hubble.")
     
@@ -227,14 +257,23 @@ def main():
         if d_h.ndim > 2: d_h = d_h[0]
         w_h = WCS(h[0].header)
     
+    # --- CREAZIONE MAPPA CONTESTO (PREVIEW) ---
+    print("🗺️  Creazione Mappa di Contesto per i Debug...")
+    # Calcoliamo un fattore di downsample per avere una preview larga max 2000px
+    h_h, h_w = d_h.shape
+    preview_ds = max(1, int(max(h_h, h_w) / 2000))
+    
+    # Creiamo la preview (normalizzata per essere visibile)
+    preview_data = normalize_local_stretch(d_h[::preview_ds, ::preview_ds])
+    print(f"   Preview Factor: 1/{preview_ds}x")
+
     h_scale = get_pixel_scale_deg(w_h)
     h_fov = h_scale * HR_SIZE
     
-    # Pre-calcolo Griglia Hubble
-    print("📐 Generazione griglia coordinate...")
-    hh, hw = d_h.shape
-    y_list = range(0, hh - HR_SIZE + 1, STRIDE)
-    x_list = range(0, hw - HR_SIZE + 1, STRIDE)
+    # Griglia
+    print("📐 Generazione griglia...")
+    y_list = range(0, h_h - HR_SIZE + 1, STRIDE)
+    x_list = range(0, h_w - HR_SIZE + 1, STRIDE)
     
     grid_indices = []
     grid_centers_pix = []
@@ -246,11 +285,11 @@ def main():
     grid_centers_pix = np.array(grid_centers_pix)
     grid_coords_world = w_h.wcs_pix2world(grid_centers_pix, 0)
     
-    # File Osservatorio
+    # File Obs
     o_files = sorted(list(path_o.glob("*.fit*")))
-    print(f"   🔭 File Osservatorio da analizzare: {len(o_files)}")
+    print(f"   🔭 File Osservatorio: {len(o_files)}")
     
-    # Multiprocessing
+    # Processing
     manager = multiprocessing.Manager()
     counter = manager.Value('i', 0)
     lock = manager.Lock()
@@ -259,7 +298,7 @@ def main():
     with ProcessPoolExecutor(initializer=init_worker, 
                              initargs=(d_h, w_h, h_fov, out_fits, out_png, 
                                        grid_coords_world, np.array(grid_indices), 
-                                       counter, lock)) as ex:
+                                       counter, lock, preview_data, preview_ds)) as ex:
         
         results = list(tqdm(ex.map(process_observatory_file, o_files), 
                             total=len(o_files), unit="file", ncols=100))
@@ -274,7 +313,6 @@ def main():
         shutil.make_archive(str(zip_name), 'zip', out_png)
         print("   ✅ ZIP creato.")
 
-        # Lancio step successivo
         next_script = CURRENT_SCRIPT_DIR / 'Modello_2_pre_da_usopatch_dataset_step3.py'
         print(f"\nVuoi lanciare lo split dataset? (Invio=SI)")
         if input(">> ").strip() == "":
