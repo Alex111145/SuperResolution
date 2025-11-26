@@ -32,7 +32,7 @@ ROOT_DATA_DIR = PROJECT_ROOT / "data"
 # PARAMETRI DATASET
 HR_SIZE = 512           # Dimensione Hubble
 AI_LR_SIZE = 128        # Dimensione Osservatorio (Input Rete)
-STRIDE = 100            # Salto tra una patch e l'altra
+STRIDE = 20            # Salto tra una patch e l'altra
 MIN_COVERAGE = 0.50     # Minimo % di pixel validi
 MIN_PIXEL_VALUE = 0.0001 
 
@@ -62,6 +62,7 @@ def get_robust_preview(data, size=None):
             data = (data - vmin) / (vmax - vmin)
         data = exposure.equalize_adapthist(data, clip_limit=0.05)
         if size:
+            # Upscale Bicubico (order=3) per nitidezza
             return resize(data, (size, size), order=3, anti_aliasing=(size < data.shape[0]))
         return data
     except:
@@ -79,9 +80,21 @@ def create_custom_wcs(ref_wcs, center_pix, new_size, fov_deg):
     return w
 
 def find_common_anchors(img_h, img_o, tolerance=15):
-    peaks_h = peak_local_max(img_h, min_distance=15, threshold_rel=0.1, num_peaks=15)
-    peaks_o = peak_local_max(img_o, min_distance=15, threshold_rel=0.15, num_peaks=15)
+    """
+    Trova picchi luminosi (stelle/nodi) presenti in ENTRAMBE le immagini.
+    SETTINGS MODIFICATI: MOLTO PIÙ SENSIBILE
+    """
+    # 1. Soglia Relativa (threshold_rel): Abbassata a 0.02 (era 0.1/0.15)
+    #    Significa che basta che un pixel sia il 2% più luminoso del picco max per essere candidato.
+    # 2. Num Peaks: Alzato a 100 (era 15)
+    # 3. Min Distance: Ridotta a 10px (era 15) per trovare stelle vicine
+    
+    peaks_h = peak_local_max(img_h, min_distance=10, threshold_rel=0.02, num_peaks=100)
+    peaks_o = peak_local_max(img_o, min_distance=10, threshold_rel=0.02, num_peaks=100)
+
     common_points = []
+    
+    # Matching
     for yh, xh in peaks_h:
         if len(peaks_o) == 0: break
         dists = np.sqrt((peaks_o[:, 0] - yh)**2 + (peaks_o[:, 1] - xh)**2)
@@ -129,21 +142,23 @@ def save_diagnostic_card(patch_h, patch_o,
 
         ax3 = fig.add_subplot(gs[0, 2])
         ax3.axis('off')
+        
+        # Calcolo ancore qui per averne il numero
+        common_anchors = find_common_anchors(prev_h, prev_o)
+        
         txt_info = (f"🔍 SEARCH & LOCK DEBUG\n"
                     f"PAIR ID: {save_path.stem}\n"
                     f"SCORE: {template_match_val:.3f} (Req: {MIN_CORRELATION})\n"
                     f"STATUS: ✅ GOOD MATCH\n\n"
-                    f"🟡 YELLOW DOTS = Common Stars")
+                    f"🟡 ANCHORS FOUND: {len(common_anchors)}")
         ax3.text(0.05, 0.5, txt_info, fontsize=14, va='center', color='green', fontweight='bold', family='monospace')
-
-        common_anchors = find_common_anchors(prev_h, prev_o)
 
         # RIGA 2
         ax4 = fig.add_subplot(gs[1, 0])
         ax4.imshow(prev_h, origin='lower', cmap='inferno')
         if common_anchors:
             xs, ys = zip(*common_anchors)
-            ax4.scatter(xs, ys, c='yellow', s=100, edgecolors='black', marker='o')
+            ax4.scatter(xs, ys, c='yellow', s=80, edgecolors='black', marker='o') # Pallini leggermente più piccoli
         border_h = patches.Rectangle((2, 2), HR_SIZE-4, HR_SIZE-4, linewidth=4, edgecolor=BOX_COLOR, facecolor='none')
         ax4.add_patch(border_h)
         ax4.set_title("Final Hubble", color=BOX_COLOR)
@@ -153,7 +168,7 @@ def save_diagnostic_card(patch_h, patch_o,
         ax5.imshow(prev_o, origin='lower', cmap='viridis')
         if common_anchors:
             xs, ys = zip(*common_anchors)
-            ax5.scatter(xs, ys, c='yellow', s=100, edgecolors='black', marker='o')
+            ax5.scatter(xs, ys, c='yellow', s=80, edgecolors='black', marker='o')
         border_o = patches.Rectangle((2, 2), HR_SIZE-4, HR_SIZE-4, linewidth=4, edgecolor=BOX_COLOR, facecolor='none')
         ax5.add_patch(border_o)
         ax5.set_title(f"Final Obs", color=BOX_COLOR)
@@ -166,7 +181,7 @@ def save_diagnostic_card(patch_h, patch_o,
         ax6.imshow(rgb, origin='lower')
         if common_anchors:
             xs, ys = zip(*common_anchors)
-            ax6.scatter(xs, ys, c='yellow', s=100, edgecolors='black', marker='o')
+            ax6.scatter(xs, ys, c='yellow', s=80, edgecolors='black', marker='o')
         ax6.set_title("Overlay", color='yellow')
         ax6.axis('off')
         
@@ -233,7 +248,7 @@ def process_single_patch_search_and_lock(args):
             best_y, best_x = ij
             max_corr = result[best_y, best_x]
             
-            # SE NON SUPERA LA SOGLIA, SALTA E BASTA (Niente log PNG)
+            # FILTRO CORRELAZIONE
             if max_corr < MIN_CORRELATION:
                 continue
 
@@ -266,7 +281,6 @@ def process_single_patch_search_and_lock(args):
             
             saved_count += 1
             
-            # SALVA PNG PER OGNI COPPIA SALVATA (Senza limiti)
             png_path = out_png_dir / f"check_pair_{idx:06d}.jpg"
             save_diagnostic_card(patch_h, patch_final, search_area, max_corr, png_path, (shift_y, shift_x))
             
@@ -289,7 +303,7 @@ def select_target_directory():
     except: return None
 
 def main():
-    print(f"🚀 ESTRAZIONE PATCH v5: ALL PAIRS PNG (No Rejects)")
+    print(f"🚀 ESTRAZIONE PATCH v6: HIGH SENSITIVITY ANCHORS")
     
     target_dir = ROOT_DATA_DIR / "M33" 
     if len(sys.argv) > 1: target_dir = Path(sys.argv[1])
@@ -340,7 +354,7 @@ def main():
         for x in range(0, h_w - HR_SIZE + 1, STRIDE):
             tasks.append((h_master_path, y, x))
             
-    print(f"   🔍 Avvio. Verranno salvate PNG per TUTTE le coppie valide.")
+    print(f"   🔍 Avvio (Soglia stelle ridotta per più pallini)...")
     
     with ProcessPoolExecutor(max_workers=6, initializer=init_worker,
                              initargs=(d_h, h_head, w_h, out_fits, out_png, h_fov_deg, o_files_good)) as ex:
