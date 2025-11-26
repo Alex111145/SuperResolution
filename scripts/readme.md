@@ -1,0 +1,1 @@
+dopo aver fatto dataset 4 vedere quante patch sono scure e nel caso rifarle aumentando MIN_COVERAGE = 0.40  e diminuendo lo stride 
