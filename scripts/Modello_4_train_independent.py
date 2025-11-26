@@ -90,7 +90,7 @@ def train_worker(args):
     writer = SummaryWriter(str(log_dir))
 
     splits_dir = ROOT_DATA_DIR / args.target / "6_patches_final" / "splits"
-    json_train, json_val, num_samples = create_partitioned_json(splits_dir, rank, 7)
+    json_train, json_val, num_samples = create_partitioned_json(splits_dir, rank, 10)
     
     # CONFIGURAZIONE STABILE
     BATCH_SIZE = 2  
