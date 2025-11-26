@@ -38,8 +38,7 @@ MIN_PIXEL_VALUE = 0.0001
 DEBUG_SAMPLES = 10
 
 # LIMITI PER L'AUTO-ALLINEAMENTO
-MAX_SHIFT_PIXELS = 30  # Se lo shift calcolato è maggiore di 30px LR, lo ignoriamo (probabile errore)
-
+MAX_SHIFT_PIXELS = 40  # Se lo shift calcolato è maggiore di 40px LR, lo ignoriamo (probabile errore)
 log_lock = threading.Lock()
 # ==========================================================
 
