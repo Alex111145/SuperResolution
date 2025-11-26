@@ -32,7 +32,7 @@ ROOT_DATA_DIR = PROJECT_ROOT / "data"
 # PARAMETRI DATASET
 HR_SIZE = 512           # Dimensione Hubble
 AI_LR_SIZE = 128        # Dimensione Osservatorio (Input Rete)
-STRIDE = 20            # Salto tra una patch e l'altra
+STRIDE = 30           # Salto tra una patch e l'altra
 MIN_COVERAGE = 0.50     # Minimo % di pixel validi
 MIN_PIXEL_VALUE = 0.0001 
 
@@ -89,8 +89,8 @@ def find_common_anchors(img_h, img_o, tolerance=15):
     # 2. Num Peaks: Alzato a 100 (era 15)
     # 3. Min Distance: Ridotta a 10px (era 15) per trovare stelle vicine
     
-    peaks_h = peak_local_max(img_h, min_distance=10, threshold_rel=0.02, num_peaks=100)
-    peaks_o = peak_local_max(img_o, min_distance=10, threshold_rel=0.02, num_peaks=100)
+    peaks_h = peak_local_max(img_h, min_distance=1, threshold_rel=0.02, num_peaks=1000)
+    peaks_o = peak_local_max(img_o, min_distance=1, threshold_rel=0.02, num_peaks=1000)
 
     common_points = []
     
