@@ -33,7 +33,7 @@ ROOT_DATA_DIR = PROJECT_ROOT / "data"
 HR_SIZE = 512 
 AI_LR_SIZE = 128
 STRIDE = 51 
-MIN_COVERAGE = 0.50 
+MIN_COVERAGE = 0.50  
 MIN_PIXEL_VALUE = 0.0001 
 DEBUG_SAMPLES = 10
 
@@ -95,25 +95,52 @@ def save_diagnostic_card(data_h_orig, data_o_raw_orig,
         mismatch_ra = abs(h_ra - lr_ra) * 3600
         mismatch_dec = abs(h_dec - lr_dec) * 3600
 
-        # RIGA 1: Contesto
+        # RIGA 1: Contesto (HUBBLE)
         ax1 = fig.add_subplot(gs[0, 0])
         ax1.axis('off')
         h_small = get_robust_preview(data_h_orig, 512)
         ax1.imshow(h_small, origin='lower', cmap='inferno')
         ax1.set_title("GLOBAL HUBBLE MAP", color='red', fontweight='bold')
         
-        # Box Patch
+        # Box Patch Hubble (Ciano)
         scale_y = 512 / data_h_orig.shape[0]
         scale_x = 512 / data_h_orig.shape[1]
         rect_h = patches.Rectangle((x*scale_x, y*scale_y), HR_SIZE*scale_x, HR_SIZE*scale_y, 
                                    linewidth=2, edgecolor='cyan', facecolor='none')
         ax1.add_patch(rect_h)
 
+        # RIGA 1: Contesto (OBSERVATORY)
         ax2 = fig.add_subplot(gs[0, 1])
         o_small = get_robust_preview(data_o_raw_orig, 512)
         ax2.imshow(o_small, origin='lower', cmap='viridis')
         ax2.set_title("GLOBAL OBS MAP", color='green', fontweight='bold')
         ax2.axis('off')
+        
+        # --- MODIFICA: Box Patch Observatory (Rosso) ---
+        # 1. Calcolo fattori di scala per la preview 512px
+        scale_y_o = 512 / data_o_raw_orig.shape[0]
+        scale_x_o = 512 / data_o_raw_orig.shape[1]
+        
+        # 2. Calcolo centro patch in coordinate World (dal WCS Hubble)
+        # x, y sono angolo basso-sx, aggiungo metà dimensione
+        hcx, hcy = x + HR_SIZE/2, y + HR_SIZE/2
+        sky_center = wcs_h.pixel_to_world(hcx, hcy)
+        
+        # 3. Conversione centro World -> Pixel Observatory
+        ocx, ocy = wcs_o_raw.world_to_pixel(sky_center)
+        
+        # 4. Calcolo angolo basso-sx del box su Obs (in pixel originali)
+        # raw_crop_size è la stima della dimensione patch in pixel Obs
+        box_x = float(ocx) - raw_crop_size/2
+        box_y = float(ocy) - raw_crop_size/2
+        
+        # 5. Disegno rettangolo Rosso scalato sulla preview
+        rect_o = patches.Rectangle((box_x*scale_x_o, box_y*scale_y_o), 
+                                   raw_crop_size*scale_x_o, 
+                                   raw_crop_size*scale_y_o, 
+                                   linewidth=2, edgecolor='red', facecolor='none')
+        ax2.add_patch(rect_o)
+        # -----------------------------------------------
 
         ax3 = fig.add_subplot(gs[0, 2])
         ax3.axis('off')
@@ -152,6 +179,7 @@ def save_diagnostic_card(data_h_orig, data_o_raw_orig,
         plt.close(fig)
     except Exception as e:
         print(f"Error saving PNG: {e}")
+        traceback.print_exc()
 
 # --- WORKER LOGIC ---
 
@@ -353,7 +381,8 @@ def main():
             with fits.open(f) as o:
                 w = WCS(o[0].header)
                 dist = np.sqrt((w.wcs.crval[0]-h_center[0])**2 + (w.wcs.crval[1]-h_center[1])**2)
-                if dist < 0.1: 
+                # MODIFICA APPLICATA: Tolleranza aumentata a 0.5 gradi
+                if dist < 0.5: 
                     o_files_good.append(f)
         except: pass
         
