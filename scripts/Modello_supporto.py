@@ -1,14 +1,13 @@
 """
-TRAINING INDEPENDENT WORKER (TENSORBOARD LOG EVERY 2 EPOCHS)
+TRAINING INDEPENDENT WORKER (TENSORBOARD LOG OGNI 3 EPOCHE)
 Batch Size: 2 | Workers: 1
-Update: Logga Training e Validation su TensorBoard ogni 2 epoche.
+Update: Logga Training e Validation su TensorBoard ogni 3 epoche.
 """
 
 import os
 # Ottimizzazioni di sistema
 os.environ["OMP_NUM_THREADS"] = "1" 
 os.environ["MKL_NUM_THREADS"] = "1"
-os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 import cv2
 cv2.setNumThreads(0)
 
@@ -55,6 +54,7 @@ def create_partitioned_json(split_dir, rank, total_gpus):
         my_files = all_files[rank::total_gpus]
         
         for entry in my_files:
+            # Uso Path.resolve() per garantire che il percorso sia assoluto (necessario in multiprocessing)
             lr = (d / entry.name / "observatory.fits").resolve()
             hr = (d / entry.name / "hubble.fits").resolve()
             if lr.exists() and hr.exists():
@@ -92,11 +92,21 @@ def train_worker(args):
     splits_dir = ROOT_DATA_DIR / args.target / "6_patches_final" / "splits"
     json_train, json_val, num_samples = create_partitioned_json(splits_dir, rank, 10)
     
-    # CONFIGURAZIONE STABILE
-    BATCH_SIZE = 2  
-    ACCUM_STEPS = 8 
-    LOG_INTERVAL = 2 # <--- AGGIORNA TENSORBOARD OGNI 2 EPOCHE
+    # CONFIGURAZIONE AGGIORNATA
+    BATCH_SIZE = 2      # BATCH FISICO (Basso)
+    ACCUM_STEPS = 16    # ACCUMULO AUMENTATO (Batch Effettivo = 32)
     
+    # GRAFICI TENSORBOARD OGNI 3 EPOCHE
+    LOG_INTERVAL = 3    
+    # IMMAGINI PREVIEW OGNI 10 EPOCHE
+    IMAGE_LOG_INTERVAL = 10
+    # MODIFICA: CHECKPOINT OGNI 10 EPOCHE
+    CHECKPOINT_INTERVAL = 10
+    
+    print(f"📦 Dataset: {len(json.load(open(json_train, 'r')))} coppie da {json_train.name}")
+    print(f"📦 Dataset: {len(json.load(open(json_val, 'r')))} coppie da {json_val.name}")
+    print(f"🔧 Configurazione: Batch Fisico={BATCH_SIZE}, Accumulo={ACCUM_STEPS} (Effettivo=32)")
+
     train_ds = AstronomicalDataset(json_train, base_path=PROJECT_ROOT, augment=True)
     val_ds = AstronomicalDataset(json_val, base_path=PROJECT_ROOT, augment=False)
     
@@ -150,7 +160,7 @@ def train_worker(args):
                 img_processed = (i + 1) * BATCH_SIZE
                 pbar.set_postfix_str(f"Img {img_processed}/{num_samples} | L: {current_val:.4f}")
 
-        # --- LOGGING & VALIDATION (OGNI 2 EPOCHE) ---
+        # --- LOGGING & VALIDATION (OGNI LOG_INTERVAL EPOCHE) ---
         if epoch % LOG_INTERVAL == 0:
             
             # 1. Logga Training Loss
@@ -181,7 +191,9 @@ def train_worker(args):
                     metrics.update(v_pred.float(), v_hr.float())
                     
                     if j == 0:
+                        # Ricampiona LR a 512x512 per il confronto visivo
                         v_lr_up = torch.nn.functional.interpolate(v_lr, size=(512,512), mode='nearest')
+                        # Concatena LR, Predizione e Ground Truth
                         preview_img = torch.cat((v_lr_up, v_pred, v_hr), dim=3)
 
             res = metrics.compute()
@@ -192,8 +204,8 @@ def train_worker(args):
             writer.add_scalar('Validation/PSNR', res['psnr'], epoch)
             writer.add_scalar('Validation/SSIM_SRM', res['ssim'], epoch)
             
-            # 4. Logga Immagini e Preview (ogni 10 epoche per non intasare disco, ma grafici ogni 2)
-            if preview_img is not None and epoch % 10 == 0:
+            # 4. Logga Immagini e Preview (OGNI 10 EPOCHE)
+            if preview_img is not None and epoch % IMAGE_LOG_INTERVAL == 0:
                 preview_img = preview_img.clamp(0, 1)
                 writer.add_image('Preview/Confronto', preview_img[0], epoch)
                 vutils.save_image(preview_img, img_dir / "live_preview.png", normalize=False)
@@ -203,8 +215,12 @@ def train_worker(args):
             
             pbar.set_postfix_str(f"L:{avg_total:.3f}|V:{avg_val_loss:.3f}|SSIM:{res['ssim']:.3f}")
 
-        if epoch % 50 == 0:
+        # SALVA CHECKPOINT OGNI 10 EPOCHE
+        if epoch % CHECKPOINT_INTERVAL == 0:
+            torch.save(model.state_dict(), save_dir / f"epoch_{epoch:04d}.pth")
+            # Salva anche come 'last.pth' per la ripresa
             torch.save(model.state_dict(), save_dir / "last.pth")
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
