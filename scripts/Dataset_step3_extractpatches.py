@@ -276,6 +276,12 @@ def process_single_patch_search_and_lock(args):
             fits.PrimaryHDU(patch_final.astype(np.float32), header=obs_hdr).writeto(pair_dir/"observatory.fits", overwrite=True)
             
             saved_count += 1
+            # === MODIFICA QUI: Salva PNG solo se l'indice è multiplo di 10 ===
+            if idx % 10 == 0:
+                png_path = out_png_dir / f"check_pair_{idx:06d}.jpg"
+                save_diagnostic_card(patch_h, patch_final, search_area, max_corr, png_path, (shift_y, shift_x))
+            # ================================================================
+
             
             png_path = out_png_dir / f"check_pair_{idx:06d}.jpg"
             save_diagnostic_card(patch_h, patch_final, search_area, max_corr, png_path, (shift_y, shift_x))
