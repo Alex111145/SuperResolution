@@ -3,7 +3,7 @@ import sys
 import shutil
 import numpy as np
 import matplotlib
-# Imposta il backend non interattivo
+# Imposta il backend non interattivo per massimizzare le risorse
 matplotlib.use('Agg') 
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
@@ -29,11 +29,11 @@ CURRENT_SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = CURRENT_SCRIPT_DIR.parent
 ROOT_DATA_DIR = PROJECT_ROOT / "data"
 
-# PARAMETRI DATASET
+# PARAMETRI DATASET (Ottimizzati per M33)
 HR_SIZE = 512           # Dimensione Hubble
 AI_LR_SIZE = 128        # Dimensione Osservatorio (Input Rete)
-STRIDE = 30           # Salto tra una patch e l'altra
-MIN_COVERAGE = 0.50     # Minimo % di pixel validi
+STRIDE = 13             # Salto tra una patch e l'altra (Genera ~1000 patch)
+MIN_COVERAGE = 0.40     # Minimo % di pixel validi (Cattura anche i bordi)
 MIN_PIXEL_VALUE = 0.0001 
 
 # PARAMETRI "SEARCH & LOCK"
@@ -84,11 +84,6 @@ def find_common_anchors(img_h, img_o, tolerance=15):
     Trova picchi luminosi (stelle/nodi) presenti in ENTRAMBE le immagini.
     SETTINGS MODIFICATI: MOLTO PIÙ SENSIBILE
     """
-    # 1. Soglia Relativa (threshold_rel): Abbassata a 0.02 (era 0.1/0.15)
-    #    Significa che basta che un pixel sia il 2% più luminoso del picco max per essere candidato.
-    # 2. Num Peaks: Alzato a 100 (era 15)
-    # 3. Min Distance: Ridotta a 10px (era 15) per trovare stelle vicine
-    
     peaks_h = peak_local_max(img_h, min_distance=1, threshold_rel=0.02, num_peaks=1000)
     peaks_o = peak_local_max(img_o, min_distance=1, threshold_rel=0.02, num_peaks=1000)
 
@@ -305,6 +300,10 @@ def select_target_directory():
 def main():
     print(f"🚀 ESTRAZIONE PATCH v6: HIGH SENSITIVITY ANCHORS")
     
+    # Rilevamento automatico CPU per BOOST
+    max_cpu = os.cpu_count()
+    print(f"🔥 BOOST ATTIVO: Utilizzo di {max_cpu} CPU in parallelo + Max RAM disponibile.")
+    
     target_dir = ROOT_DATA_DIR / "M33" 
     if len(sys.argv) > 1: target_dir = Path(sys.argv[1])
     else:
@@ -356,11 +355,22 @@ def main():
             
     print(f"   🔍 Avvio (Soglia stelle ridotta per più pallini)...")
     
-    with ProcessPoolExecutor(max_workers=6, initializer=init_worker,
+    # MODIFICA BOOST: max_workers=max_cpu invece di 6
+    with ProcessPoolExecutor(max_workers=max_cpu, initializer=init_worker,
                              initargs=(d_h, h_head, w_h, out_fits, out_png, h_fov_deg, o_files_good)) as ex:
         results = list(tqdm(ex.map(process_single_patch_search_and_lock, tasks), total=len(tasks), ncols=100))
         
     print(f"\n✅ COMPLETATO. Controlla {out_png}")
+
+    # ================= ZIPPING AUTOMATICO =================
+    print(f"\n📦 Creazione archivio ZIP del dataset...")
+    zip_name = target_dir / f"{target_dir.name}_dataset"
+    try:
+        shutil.make_archive(str(zip_name), 'zip', str(out_fits))
+        print(f"✅ Archivio salvato correttamente in: {zip_name}.zip")
+    except Exception as e:
+        print(f"❌ Errore durante la creazione dello ZIP: {e}")
+    # ======================================================
 
 if __name__ == "__main__":
     main()
