@@ -277,7 +277,7 @@ def process_single_patch_search_and_lock(args):
             
             saved_count += 1
             # === MODIFICA QUI: Salva PNG solo se l'indice è multiplo di 10 ===
-            if idx % 10 == 0:
+            if idx % 50 == 0:
                 png_path = out_png_dir / f"check_pair_{idx:06d}.jpg"
                 save_diagnostic_card(patch_h, patch_final, search_area, max_corr, png_path, (shift_y, shift_x))
             # ================================================================
@@ -392,4 +392,5 @@ def main():
     # =================================================================
     
 if __name__ == "__main__":
+
     main()
