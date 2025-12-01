@@ -14,37 +14,34 @@ def setup_project():
     MODELS_DIR.mkdir(exist_ok=True)
     
     print("="*60)
-    print("🛠️  ASTRO SUPER-RES SETUP (TIFF EDITION)")
-    print(f"📂  Project Root: {PROJECT_ROOT}")
+    print("🛠️  ASTRO SUPER-RES SETUP")
+    print(f"📂  Root: {PROJECT_ROOT}")
     print("="*60)
 
-    # --- FASE 1: Configurazione GPU ---
-    print("\n📦 [1/2] Configurazione ambiente GPU...")
+    print("\n📦 [1/2] GPU Setup...")
     try:
         run_cmd(f"{sys.executable} -m pip install tensorboard")
-        # Check veloce torch
         import torch
-        print(f"   ✅ PyTorch rilevato: {torch.__version__}")
+        print(f"   ✅ PyTorch: {torch.__version__}")
     except:
-        print("   ⚠️  PyTorch non trovato o errore. Installazione in corso...")
-        cuda_cmd = (f"{sys.executable} -m pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118")
+        print("   ⚠️  Installazione PyTorch...")
+        cuda_cmd = (f"{sys.executable} -m pip install torch torchvision torchaudio "
+                   "--index-url https://download.pytorch.org/whl/cu118")
         run_cmd(cuda_cmd)
 
-    # --- FASE 2: Librerie Progetto ---
-    print("\n📦 [2/2] Installazione dipendenze Progetto...")
+    print("\n📦 [2/2] Dipendenze...")
     libs = [
         "einops", "timm", "lmdb", "addict", "future", "yapf",
         "scipy", "\"numpy<2.0\"", "tqdm", "pyyaml",
         "matplotlib", "scikit-image", "opencv-python",
-        "Pillow",  # CRUCIALE PER TIFF
-        "astropy", "astroalign", "reproject"
+        "Pillow", "astropy", "astroalign", "reproject"
     ]
     
     try:
         libs_str = " ".join(libs)
         run_cmd(f"{sys.executable} -m pip install {libs_str}")
     except subprocess.CalledProcessError as e:
-        print(f"❌ Errore dipendenze: {e}")
+        print(f"❌ Errore: {e}")
 
     print("\n✅ SETUP COMPLETE!")
 
