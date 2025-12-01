@@ -1,9 +1,3 @@
-"""
-TRAINING WORKER UNIFICATO (FULL LOGGING EDITION)
-- Aggiornamento grafici: OGNI EPOCA
-- Grafici extra: Loss Components (Charbonnier, Astro, Perceptual) + Learning Rate
-- FIX: Conversione esplicita float32 per le metriche (risolve RuntimeError Mixed Precision)
-"""
 import os
 import argparse
 import sys
@@ -16,62 +10,49 @@ from torch.utils.tensorboard import SummaryWriter
 from pathlib import Path
 from tqdm import tqdm
 
-# --- CONFIGURAZIONE PATH ---
 CURRENT_SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = CURRENT_SCRIPT_DIR.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-# Import moduli
 try:
     from src.architecture import HybridSuperResolutionModel
     from src.dataset import AstronomicalDataset
     from src.losses import CombinedLoss
     from src.metrics import Metrics
 except ImportError:
-    print("❌ Errore Import: Assicurati che la cartella 'src' sia nella root.")
+    print("❌ Errore Import src.")
     sys.exit(1)
 
-# --- IPERPARAMETRI ---
 BATCH_SIZE = 3          
 ACCUM_STEPS = 20        
 LR = 4e-4
 TOTAL_EPOCHS = 150
-
-# LOGGING
 LOG_INTERVAL = 1        
 IMAGE_INTERVAL = 1      
 
 def train_worker(args):
     device = torch.device('cuda:0')
-    rank = args.rank
-    target_name = f"{args.target}_GPU_{rank}"
+    target_name = f"{args.target}_GPU_0"
     
-    # Setup Cartelle
     out_dir = PROJECT_ROOT / "outputs" / target_name
     save_dir = out_dir / "checkpoints"
     img_dir = out_dir / "images"
     log_dir = out_dir / "tensorboard"
     for d in [save_dir, img_dir, log_dir]: d.mkdir(parents=True, exist_ok=True)
 
-    # TensorBoard Writer
     writer = SummaryWriter(str(log_dir))
 
-    # Caricamento Split
     splits_dir = PROJECT_ROOT / "data" / args.target / "8_dataset_split" / "splits_json"
     if not splits_dir.exists():
-        sys.exit("❌ Splits non trovati. Esegui prima Modello_2.py")
+        sys.exit("❌ Splits non trovati. Esegui Modello_2.py")
     
-    with open(splits_dir / "train.json") as f: full_train = json.load(f)
-    with open(splits_dir / "val.json") as f: full_val = json.load(f)
+    with open(splits_dir / "train.json") as f: train_data = json.load(f)
+    with open(splits_dir / "val.json") as f: val_data = json.load(f)
     
-    my_train = full_train 
-    my_val = full_val
-    
-    # JSON Temporanei
-    ft_path = splits_dir / f"temp_train_{rank}.json"
-    fv_path = splits_dir / f"temp_val_{rank}.json"
-    with open(ft_path, 'w') as f: json.dump(my_train, f)
-    with open(fv_path, 'w') as f: json.dump(my_val, f)
+    ft_path = splits_dir / "temp_train.json"
+    fv_path = splits_dir / "temp_val.json"
+    with open(ft_path, 'w') as f: json.dump(train_data, f)
+    with open(fv_path, 'w') as f: json.dump(val_data, f)
 
     train_ds = AstronomicalDataset(ft_path, base_path=PROJECT_ROOT, augment=True)
     val_ds = AstronomicalDataset(fv_path, base_path=PROJECT_ROOT, augment=False)
@@ -80,8 +61,7 @@ def train_worker(args):
                               num_workers=8, pin_memory=True, prefetch_factor=2, persistent_workers=True)
     val_loader = DataLoader(val_ds, batch_size=1, shuffle=False, num_workers=4)
 
-    # Modello & Ottimizzazione
-    print(f"🚀 Avvio Training GPU {rank}: {len(train_ds)} campioni.")
+    print(f"🚀 Training: {len(train_ds)} campioni.")
     model = HybridSuperResolutionModel(smoothing='balanced', device=device).to(device)
     optimizer = optim.AdamW(model.parameters(), lr=LR, weight_decay=1e-4)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=TOTAL_EPOCHS, eta_min=1e-7)
@@ -91,7 +71,6 @@ def train_worker(args):
     best_psnr = 0.0
 
     for epoch in range(1, TOTAL_EPOCHS + 1):
-        # --- TRAINING LOOP ---
         model.train()
         
         acc_loss_total = 0.0
@@ -128,7 +107,6 @@ def train_worker(args):
 
         scheduler.step()
         
-        # --- LOGGING & VALIDATION (OGNI EPOCA) ---
         if epoch % LOG_INTERVAL == 0:
             steps = len(train_loader)
             current_lr = optimizer.param_groups[0]['lr']
@@ -139,7 +117,6 @@ def train_worker(args):
             writer.add_scalar('Train/Loss_Perceptual', acc_perc / steps, epoch)
             writer.add_scalar('Train/Learning_Rate', current_lr, epoch)
             
-            # VALIDAZIONE
             model.eval()
             metrics = Metrics()
             
@@ -150,7 +127,6 @@ def train_worker(args):
                     with torch.amp.autocast('cuda'):
                         v_pred = model(v_lr)
                     
-                    # [FIX] .float() per evitare errore HalfTensor vs FloatTensor
                     metrics.update(v_pred.float(), v_hr.float())
             
             res = metrics.compute()
@@ -158,7 +134,7 @@ def train_worker(args):
             writer.add_scalar('Val/PSNR', res['psnr'], epoch)
             writer.add_scalar('Val/SSIM', res['ssim'], epoch)
             
-            tqdm.write(f"📊 EP {epoch} | PSNR: {res['psnr']:.2f} | Loss Astro: {(acc_astro/steps):.4f}")
+            tqdm.write(f"📊 EP {epoch} | PSNR: {res['psnr']:.2f} | Astro Loss: {(acc_astro/steps):.4f}")
 
             if res['psnr'] > best_psnr:
                 best_psnr = res['psnr']
@@ -179,6 +155,5 @@ def train_worker(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--target', type=str, required=True)
-    parser.add_argument('--rank', type=int, default=0)
     args = parser.parse_args()
     train_worker(args)

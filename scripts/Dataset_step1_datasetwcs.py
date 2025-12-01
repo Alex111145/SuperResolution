@@ -1,11 +1,8 @@
 import os
 import sys
-import time
 import logging
 from datetime import datetime
 import numpy as np
-import astropy
-import pandas as pd
 from astropy.io import fits
 from astropy.wcs import WCS
 from astropy.wcs.utils import proj_plane_pixel_scales
@@ -17,37 +14,29 @@ from pathlib import Path
 import subprocess
 import shutil
 
-# Gestione importazioni opzionali
 try:
     from reproject import reproject_interp
     REPROJECT_AVAILABLE = True
 except ImportError:
     REPROJECT_AVAILABLE = False
-    print("⚠️ Libreria 'reproject' non trovata. La registrazione fallirà.")
+    print("⚠️ Libreria 'reproject' non trovata.")
 
 warnings.filterwarnings('ignore')
 
-# ================= CONFIGURAZIONE =================
 CURRENT_SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = CURRENT_SCRIPT_DIR.parent
 ROOT_DATA_DIR = PROJECT_ROOT / "data"
 LOG_DIR_ROOT = PROJECT_ROOT / "logs"
 
-# === IMPOSTAZIONI TELESCOPIO (Salvagente per M33) ===
-# Se ASTAP fallisce, usiamo questo FOV (altezza in gradi).
-# Calcolo per M1 (Focale 2670mm, Sensore ~21mm altezza) -> ~0.46 gradi
-FORCE_FOV = 0.46  #focale telescopio osservatorio in gradi
-USE_MANUAL_FOV = True # Metti False se vuoi che ASTAP legga sempre dall'header
-
+FORCE_FOV = 0.46
+USE_MANUAL_FOV = True
 NUM_THREADS = 2 
 log_lock = threading.Lock()
-
-# ================= UTILITY & SETUP =================
 
 def setup_logging():
     os.makedirs(LOG_DIR_ROOT, exist_ok=True)
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    log_file = LOG_DIR_ROOT / f'pipeline_smart_FIXED_FOV_{timestamp}.log'
+    log_file = LOG_DIR_ROOT / f'pipeline_{timestamp}.log'
     
     logging.basicConfig(
         level=logging.INFO,
@@ -62,7 +51,6 @@ def find_astap_path():
         r"C:\Program Files (x86)\astap\astap.exe",
         r"D:\astap\astap.exe",
         r"F:\astap\astap.exe",
-        r"C:\ProgramData\Microsoft\Windows\Start Menu\Programs\ASTAP\astap.exe"
     ]
     for path in possible_paths:
         if os.path.isfile(path): return path
@@ -72,7 +60,7 @@ def find_astap_path():
 
 def select_target_directory():
     print("\n" + "🔭"*35)
-    print("PIPELINE REGISTRAZIONE (FORCED FOV)".center(70))
+    print("PIPELINE REGISTRAZIONE".center(70))
     print("🔭"*35)
     try:
         subdirs = [d for d in ROOT_DATA_DIR.iterdir() if d.is_dir() and d.name not in ['splits', 'logs']]
@@ -86,8 +74,6 @@ def select_target_directory():
         return [subdirs[idx]] if 0 <= idx < len(subdirs) else []
     except: return []
 
-# ================= STEP 1: ASTAP SOLVING =================
-
 def run_astap_cmd(cmd, logger):
     startupinfo = None
     if sys.platform == 'win32':
@@ -99,7 +85,6 @@ def solve_with_astap(inp_file, out_file, astap_exe, logger):
     try:
         shutil.copy2(inp_file, out_file)
         
-        # Check preventivo: WCS già presente?
         try:
             with fits.open(out_file) as hdul:
                 for hdu in hdul:
@@ -109,8 +94,6 @@ def solve_with_astap(inp_file, out_file, astap_exe, logger):
                     except: pass
         except: pass 
         
-        # --- TENTATIVO 1: Solving Veloce (usa header) ---
-        # Se l'header ha coordinate, prova in raggio 30 gradi
         cmd_fast = [astap_exe, "-f", str(out_file), "-update", "-r", "30", "-z", "0"]
         res = run_astap_cmd(cmd_fast, logger)
         
@@ -121,16 +104,10 @@ def solve_with_astap(inp_file, out_file, astap_exe, logger):
                     solved = True
                     break
 
-        # --- TENTATIVO 2: Blind Solve (Forza Bruta) ---
         if not solved:
-            # Qui usiamo il FOV forzato se abilitato. 
-            # Questo salva la situazione se l'header manca di Focale/PixelSize
             cmd_blind = [astap_exe, "-f", str(out_file), "-update", "-r", "180", "-z", "0"]
-            
             if USE_MANUAL_FOV:
-                # Aggiungiamo -fov <gradi> per dire ad ASTAP la scala esatta
                 cmd_blind.extend(["-fov", str(FORCE_FOV)])
-                
             res = run_astap_cmd(cmd_blind, logger)
             
             with fits.open(out_file) as hdul:
@@ -147,8 +124,6 @@ def solve_with_astap(inp_file, out_file, astap_exe, logger):
         else:
             with log_lock: 
                 logger.warning(f"❌ FALLITO {inp_file.name}")
-                # Logghiamo output ASTAP solo se fallisce per debug
-                # logger.warning(f"   ASTAP out: {res.stdout[:200]}...") 
             return False
 
     except Exception as e:
@@ -173,8 +148,6 @@ def process_step1_folder(inp_dir, out_dir, astap_exe, logger):
             if f.result(): success += 1
     return success
 
-# ================= STEP 2: REGISTRAZIONE =================
-
 def get_best_hdu(hdul):
     for hdu in hdul:
         if hdu.data is not None and hdu.data.ndim >= 2: return hdu
@@ -187,7 +160,6 @@ def extract_wcs_info(f, logger=None):
             w = WCS(hdu.header)
             if not w.has_celestial: return None
             
-            # Calcolo Scala Robusto
             scales = proj_plane_pixel_scales(w)
             if scales is not None and len(scales) >= 1:
                 scale_arcsec = scales[0] * 3600
@@ -211,7 +183,6 @@ def register_single_image_smart(info, ref_wcs, out_dir, logger):
             wcs_orig = WCS(header)
             
             if data.ndim == 3: data = data[0]
-            # Pulizia bad pixels
             data = np.where(data < -10000, np.nan, data)
 
         native_scale_deg = info['scale'] / 3600.0
@@ -238,7 +209,6 @@ def main_registration(h_in, o_in, h_out, o_out, logger):
     h_files = list(h_in.glob('*_solved.fits'))
     o_files = list(o_in.glob('*_solved.fits'))
     
-    # Estrazione Info
     print("   Lettura WCS headers...")
     h_infos = [x for x in [extract_wcs_info(f, logger) for f in h_files] if x]
     o_infos = [x for x in [extract_wcs_info(f, logger) for f in o_files] if x]
@@ -261,14 +231,12 @@ def main_registration(h_in, o_in, h_out, o_out, logger):
             
     return success > 0
 
-# ================= MAIN =================
-
 def main():
     logger = setup_logging()
     ASTAP_PATH = find_astap_path()
     
     if not ASTAP_PATH:
-        print("❌ ERRORE CRITICO: ASTAP non trovato!")
+        print("❌ ERRORE: ASTAP non trovato!")
         return
     
     targets = select_target_directory()
@@ -291,7 +259,7 @@ def main():
         s2 = process_step1_folder(in_h, out_solved_h, ASTAP_PATH, logger)
         
         if s1+s2 == 0:
-            print("   ❌ Nessun file risolto. Controlla il FOV in ASTAP.")
+            print("   ❌ Nessun file risolto.")
             continue
 
         print("   [2/2] Registrazione e Riproiezione...")
