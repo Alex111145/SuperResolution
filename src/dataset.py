@@ -9,7 +9,7 @@ from PIL import Image
 class AstronomicalDataset(Dataset):
     """
     Dataset per caricare coppie LR-HR da file TIFF 16-bit.
-    Normalizza correttamente da [0, 65535] a [0.0, 1.0].
+    Ottimizzato per caricamento veloce e robustezza.
     """
     def __init__(self, split_file, base_path, augment=True):
         self.base_path = Path(base_path)
@@ -44,7 +44,7 @@ class AstronomicalDataset(Dataset):
             
         except Exception as e:
             print(f"❌ Errore caricamento {path}: {e}")
-            # Ritorna un tensore nero di emergenza per non crashare
+            # Ritorna un tensore nero di emergenza per non crashare il worker
             return torch.zeros(1, 128, 128)
 
     def __getitem__(self, idx):
@@ -79,10 +79,13 @@ class AstronomicalDataset(Dataset):
             if k > 0:
                 lr_tensor = torch.rot90(lr_tensor, k, [-2, -1])
                 hr_tensor = torch.rot90(hr_tensor, k, [-2, -1])
+        
+        # FIX: Gestione stride negativi che possono causare errori con PyTorch
+        if lr_tensor.stride()[0] < 0: lr_tensor = lr_tensor.contiguous()
+        if hr_tensor.stride()[0] < 0: hr_tensor = hr_tensor.contiguous()
 
-        # Controllo di integrità (opzionale ma utile)
+        # Controllo NaN (Sicurezza)
         if torch.isnan(lr_tensor).any() or torch.isnan(hr_tensor).any():
-            print(f"⚠️ NaN rilevati nel sample {idx}")
             lr_tensor = torch.nan_to_num(lr_tensor)
             hr_tensor = torch.nan_to_num(hr_tensor)
 

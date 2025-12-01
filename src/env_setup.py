@@ -4,16 +4,13 @@ from pathlib import Path
 
 def setup_paths():
     # Calcola la root: .../SuperResolution/
-    # Questo file è in src/, quindi il genitore è la root
     SRC_DIR = Path(__file__).resolve().parent
     PROJECT_ROOT = SRC_DIR.parent
     MODELS_DIR = PROJECT_ROOT / "models"
     
     # Percorsi critici da aggiungere a sys.path
     paths_to_add = [
-        # Per BasicSR: serve la cartella che CONTIENE 'basicsr'
         MODELS_DIR / "BasicSR",
-        # Per HAT: serve la cartella che CONTIENE 'hat'
         MODELS_DIR / "HAT"
     ]
     
@@ -27,9 +24,8 @@ def setup_paths():
                 print(f"   ✅ Aggiunto al path: {p.name}")
         else:
             print(f"   ⚠️ ATTENZIONE: Percorso non trovato: {p}")
-            print(f"      Assicurati che esista: {p}")
 
-# Esegui subito il setup
+# Esegui subito il setup quando importato
 setup_paths()
 
 def import_external_archs():
@@ -45,7 +41,6 @@ def import_external_archs():
         print("   ✅ BasicSR (RRDBNet) importato correttamente.")
     except ImportError as e:
         print(f"   ❌ Errore import BasicSR: {e}")
-        print("      Suggerimento: Controlla che dentro 'models/BasicSR' ci sia una cartella 'basicsr'.")
 
     # 2. Import HAT
     try:

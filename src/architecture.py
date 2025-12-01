@@ -31,12 +31,13 @@ class AntiCheckerboardLayer(nn.Module):
 class HybridSuperResolutionModel(nn.Module):
     def __init__(self, output_size=512, smoothing='balanced', device='cuda'):
         super().__init__()
-        self.output_size = output_size # Dimensione target fissa (es. 512) <--- FIX CARATTERE U+00A0
+        self.output_size = output_size
         
         # STAGE 1: RRDBNet (BasicSR)
         if RRDBNet is None: 
             raise ImportError("BasicSR mancante. Verifica 'models/BasicSR'.")
-        # Input 1 canale -> Output 1 canale, Scale x2
+        
+        # RRDBNet Configurazione Standard
         self.stage1 = RRDBNet(num_in_ch=1, num_out_ch=1, num_feat=64, num_block=23, num_grow_ch=32, scale=2)
         
         # STAGE 2: HAT (Transformer)
@@ -45,14 +46,34 @@ class HybridSuperResolutionModel(nn.Module):
         
         if HAT_Arch:
             try:
-                # FIX OOM: Riduzione dei parametri HAT (embed_dim 180->120, window_size 16->8)
-                self.stage2 = HAT_Arch(img_size=64, patch_size=1, in_chans=1, 
-                                       embed_dim=120, depths=[6]*6,          # RIDOTTO per OOM
-                                       num_heads=[6]*6, window_size=8,       # RIDOTTO per OOM
-                                       compress_ratio=3, squeeze_factor=30, 
-                                       conv_scale=0.01, overlap_ratio=0.5, mlp_ratio=2., qkv_bias=True, 
-                                       upscale=2, img_range=1., upsampler='pixelshuffle', resi_connection='1conv')
+                # =========================================================
+                # CONFIGURAZIONE H200 (HIGH PERFORMANCE)
+                # Abbiamo 141GB VRAM: Usiamo parametri "Large" per massima qualità.
+                # =========================================================
+                self.stage2 = HAT_Arch(
+                    img_size=64, 
+                    patch_size=1, 
+                    in_chans=1, 
+                    
+                    # Parametri Maggiorati (Standard HAT-L)
+                    embed_dim=180,           # Era 120 (Ridotto) -> Ora 180 (Full)
+                    depths=[6, 6, 6, 6, 6, 6], 
+                    num_heads=[6, 6, 6, 6, 6, 6], 
+                    window_size=16,          # Era 8 (Ridotto) -> Ora 16 (Full Context)
+                    
+                    compress_ratio=3, 
+                    squeeze_factor=30, 
+                    conv_scale=0.01, 
+                    overlap_ratio=0.5, 
+                    mlp_ratio=2., 
+                    qkv_bias=True, 
+                    upscale=2, 
+                    img_range=1., 
+                    upsampler='pixelshuffle', 
+                    resi_connection='1conv'
+                )
                 self.has_stage2 = True
+                print("   ✅ HAT Model: Configurazione 'Large' attivata (H200 Mode).")
             except Exception as e: 
                 print(f"⚠️ Errore inizializzazione HAT: {e}. Uso solo Stage 1.")
 
