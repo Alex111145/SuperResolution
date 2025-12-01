@@ -120,21 +120,42 @@ def train_worker(args):
             model.eval()
             metrics = Metrics()
             
+            # --- AGGIUNTE PER IL LOGGING DELLE LOSS DI VALIDAZIONE ---
+            acc_val_loss_total = 0.0
+            acc_val_astro = 0.0
+            acc_val_perc = 0.0
+            val_steps = len(val_loader)
+            
             with torch.no_grad():
                 for v_batch in val_loader:
                     v_lr = v_batch['lr'].to(device)
                     v_hr = v_batch['hr'].to(device)
+                    
                     with torch.amp.autocast('cuda'):
                         v_pred = model(v_lr)
-                    
+                        # Calcolo della loss anche per la validazione
+                        v_loss, v_loss_dict = criterion(v_pred, v_hr) 
+
                     metrics.update(v_pred.float(), v_hr.float())
+                    
+                    # Accumulo delle loss di validazione
+                    acc_val_loss_total += v_loss.item()
+                    acc_val_astro += v_loss_dict.get('astro', torch.tensor(0.0)).item()
+                    acc_val_perc += v_loss_dict.get('perceptual', torch.tensor(0.0)).item()
             
             res = metrics.compute()
             
             writer.add_scalar('Val/PSNR', res['psnr'], epoch)
             writer.add_scalar('Val/SSIM', res['ssim'], epoch)
             
-            tqdm.write(f"📊 EP {epoch} | PSNR: {res['psnr']:.2f} | Astro Loss: {(acc_astro/steps):.4f}")
+            # Logging delle loss di validazione
+            if val_steps > 0:
+                writer.add_scalar('Val/Loss_Total', acc_val_loss_total / val_steps, epoch)
+                writer.add_scalar('Val/Loss_Astro', acc_val_astro / val_steps, epoch)
+                writer.add_scalar('Val/Loss_Perceptual', acc_val_perc / val_steps, epoch)
+            
+            # Aggiornamento del messaggio di output per mostrare la Total Loss di Validation
+            tqdm.write(f"📊 EP {epoch} | PSNR: {res['psnr']:.2f} | Astro Loss (TR): {(acc_astro/steps):.4f} | Total Loss (VAL): {(acc_val_loss_total/val_steps):.4f}")
 
             if res['psnr'] > best_psnr:
                 best_psnr = res['psnr']
