@@ -1,9 +1,6 @@
 """
-TRAINING WORKER (TIFF EDITION - FULL LOGS + AGGRESSIVE LR)
-Include:
-1. Gradient Clipping & Scheduler (per sbloccare il training)
-2. LOGGING COMPLETO (Charbonnier, L1, Astro, Perceptual, Val Loss, PSNR, SSIM)
-3. Learning Rate aumentato per sbloccare la discesa
+TRAINING WORKER (TIFF EDITION - DEBUG VERSION)
+Rimosso il try-except sugli import per vedere il vero errore.
 """
 import os
 os.environ["OMP_NUM_THREADS"] = "1" 
@@ -21,6 +18,7 @@ from torch.utils.data import DataLoader
 from pathlib import Path
 from tqdm import tqdm
 from torch.utils.tensorboard import SummaryWriter 
+import traceback # Importante per il debug
 
 # Setup Path
 CURRENT_SCRIPT_DIR = Path(__file__).resolve().parent
@@ -28,13 +26,21 @@ PROJECT_ROOT = CURRENT_SCRIPT_DIR.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 ROOT_DATA_DIR = PROJECT_ROOT / "data"
 
+# --- MODIFICA DEBUG: Import diretti senza try-except silenzioso ---
+print(f"🔧 [Worker] Loading modules from {PROJECT_ROOT}...")
 try:
     from src.architecture import HybridSuperResolutionModel
     from src.dataset import AstronomicalDataset
     from src.losses import CombinedLoss
     from src.metrics import Metrics
-except ImportError:
-    sys.exit("❌ Errore import src.")
+    print("   ✅ Moduli src importati correttamente.")
+except Exception as e:
+    print(f"\n❌ ERRORE CRITICO NELL'IMPORTARE SRC:")
+    print("-" * 60)
+    traceback.print_exc() # Stampa l'errore esatto (Sintassi, Indentazione, ecc.)
+    print("-" * 60)
+    sys.exit(1)
+# ---------------------------------------------------------------
 
 def create_partitioned_json(split_dir, rank, total_gpus):
     """Gestione partizionamento dataset per multi-GPU simulato."""
@@ -78,11 +84,11 @@ def train_worker(args):
     # --- IPERPARAMETRI ---
     BATCH_SIZE = 2      
     ACCUM_STEPS = 16    
-    LOG_INTERVAL = 3    # Ripristinato a 3 per vedere subito i grafici
+    LOG_INTERVAL = 3    
     IMAGE_LOG_INTERVAL = 10
     CHECKPOINT_INTERVAL = 10
     TOTAL_EPOCHS = 150
-    LR = 4e-4           # <--- AUMENTATO per sbloccare la discesa (era 2e-4)
+    LR = 4e-4           # Aggressive LR
     
     # Dataset
     train_ds = AstronomicalDataset(json_train, base_path=PROJECT_ROOT, augment=True)
@@ -95,7 +101,7 @@ def train_worker(args):
     model = HybridSuperResolutionModel(smoothing='balanced', device=device, output_size=512).to(device)
     optimizer = optim.AdamW(model.parameters(), lr=LR, weight_decay=1e-4, betas=(0.9, 0.99))
     
-    # Scheduler: Cosine Annealing (Aiuta a uscire dai minimi locali)
+    # Scheduler
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=TOTAL_EPOCHS, eta_min=1e-7)
     
     criterion = CombinedLoss().to(device)
@@ -106,7 +112,6 @@ def train_worker(args):
     for epoch in pbar:
         model.train()
         
-        # Accumulatori per le loss
         acc_loss_total = 0.0
         acc_loss_char = 0.0
         acc_loss_l1_raw = 0.0
@@ -127,10 +132,8 @@ def train_worker(args):
             scaler.scale(loss_scaled).backward()
             
             if (i + 1) % ACCUM_STEPS == 0:
-                # --- GRADIENT CLIPPING (CRUCIALE) ---
                 scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-                
                 scaler.step(optimizer)
                 scaler.update()
                 optimizer.zero_grad()
@@ -138,29 +141,25 @@ def train_worker(args):
             # Statistiche
             acc_loss_total += loss.item()
             acc_loss_char += loss_dict.get('char', torch.tensor(0)).item()
-            acc_loss_l1_raw += loss_dict.get('l1_raw', torch.tensor(0)).item() # <--- Ripristinato
+            acc_loss_l1_raw += loss_dict.get('l1_raw', torch.tensor(0)).item()
             acc_loss_astro += loss_dict.get('astro', torch.tensor(0)).item()
             acc_loss_perc += loss_dict.get('perceptual', torch.tensor(0)).item()
 
             if i % 10 == 0:
                 pbar.set_postfix_str(f"L:{loss.item():.4f} | LR:{optimizer.param_groups[0]['lr']:.2e}")
 
-        # Step dello Scheduler alla fine dell'epoca
         scheduler.step()
 
-        # --- LOGGING COMPLETO SU TENSORBOARD ---
         if epoch % LOG_INTERVAL == 0:
             steps = len(train_loader)
-            
-            # 1. Train Losses (Tutte le componenti)
             writer.add_scalar('Train_Main/Total_Loss', acc_loss_total / steps, epoch)
             writer.add_scalar('Train_Components/Charbonnier_Optim', acc_loss_char / steps, epoch)
-            writer.add_scalar('Train_Components/L1_Pixel_Metric', acc_loss_l1_raw / steps, epoch) # <--- Eccolo!
+            writer.add_scalar('Train_Components/L1_Pixel_Metric', acc_loss_l1_raw / steps, epoch)
             writer.add_scalar('Train_Components/Astro_Star', acc_loss_astro / steps, epoch)
             writer.add_scalar('Train_Components/Perceptual', acc_loss_perc / steps, epoch)
             writer.add_scalar('Train/Learning_Rate', optimizer.param_groups[0]['lr'], epoch)
             
-            # 2. Validation
+            # Validation
             model.eval()
             val_loss = 0.0
             metrics = Metrics()
@@ -183,7 +182,6 @@ def train_worker(args):
                         preview_img = torch.cat((v_lr_up, v_pred, v_hr), dim=3)
 
             res = metrics.compute()
-            
             writer.add_scalar('Validation/Loss', val_loss / len(val_loader), epoch)
             writer.add_scalar('Validation/PSNR', res['psnr'], epoch)
             writer.add_scalar('Validation/SSIM', res['ssim'], epoch)
@@ -195,7 +193,6 @@ def train_worker(args):
             
             writer.flush()
 
-        # Checkpoint
         if epoch % CHECKPOINT_INTERVAL == 0:
             torch.save(model.state_dict(), save_dir / "best_model.pth")
             torch.save(model.state_dict(), save_dir / "last.pth")
