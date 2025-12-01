@@ -34,7 +34,7 @@ TARGET_NAME = "M33"  # La cartella su cui testare
 CHECKPOINT_PATH = PROJECT_ROOT / "outputs" / TARGET_NAME / "checkpoints" / "best.pth"
 OUTPUT_DIR = PROJECT_ROOT / "outputs" / TARGET_NAME / "test_results"
 
-SCALE = 4        # (512 / 80)
+SCALE = 6.4        # (512 / 80)
 SMOOTHING = 'balanced'
 # ============================================================
 
