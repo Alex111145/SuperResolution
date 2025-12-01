@@ -1,11 +1,7 @@
 """
-TRAINING INDEPENDENT WORKER (TENSORBOARD LOG OGNI 3 EPOCHE)
-Batch Size: 2 | Workers: 1
-Update: Logga Training e Validation su TensorBoard ogni 3 epoche.
+TRAINING WORKER (TIFF EDITION)
 """
-
 import os
-# Ottimizzazioni di sistema
 os.environ["OMP_NUM_THREADS"] = "1" 
 os.environ["MKL_NUM_THREADS"] = "1"
 import cv2
@@ -15,16 +11,13 @@ import argparse
 import sys
 import json
 import torch
-import torch.nn as nn
 import torch.optim as optim
 import torchvision.utils as vutils
 from torch.utils.data import DataLoader
 from pathlib import Path
 from tqdm import tqdm
-from torch.cuda.amp import GradScaler 
 from torch.utils.tensorboard import SummaryWriter 
 
-# Configurazione Path
 CURRENT_SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = CURRENT_SCRIPT_DIR.parent
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -39,42 +32,30 @@ except ImportError:
     sys.exit("❌ Errore import src.")
 
 def create_partitioned_json(split_dir, rank, total_gpus):
-    """Crea un JSON contenente SOLO 1/7 dei dati totali."""
-    def scan_and_split(split_name):
-        d = split_dir / split_name
-        data = []
-        if not d.exists(): return []
+    """Legge il JSON completo (train.json) e ne prende una fetta per questa GPU."""
+    
+    def load_and_slice(json_name):
+        f_path = split_dir / json_name
+        if not f_path.exists(): return []
+        with open(f_path, 'r') as f: full_list = json.load(f)
         
-        all_files = []
-        for entry in os.scandir(d):
-            if entry.is_dir() and entry.name.startswith("pair_"):
-                all_files.append(entry)
-        
-        all_files.sort(key=lambda x: x.name)
-        my_files = all_files[rank::total_gpus]
-        
-        for entry in my_files:
-            # Uso Path.resolve() per garantire che il percorso sia assoluto (necessario in multiprocessing)
-            lr = (d / entry.name / "observatory.fits").resolve()
-            hr = (d / entry.name / "hubble.fits").resolve()
-            if lr.exists() and hr.exists():
-                data.append({
-                    "patch_id": entry.name, 
-                    "ground_path": str(lr), 
-                    "hubble_path": str(hr)
-                })
-        return data
+        # Sort per determinismo
+        full_list.sort(key=lambda x: x['patch_id'])
+        # Prendi 1 elemento ogni N (stride)
+        my_slice = full_list[rank::total_gpus]
+        return my_slice
 
-    train_list = scan_and_split("train")
-    val_list = scan_and_split("val")
+    train_slice = load_and_slice("train.json")
+    val_slice = load_and_slice("val.json") # Ogni GPU valida sul suo pezzetto
 
+    # Salva JSON temporanei per il Dataset
     ft = split_dir / f"train_worker_{rank}.json"
     fv = split_dir / f"val_worker_{rank}.json"
     
-    with open(ft, 'w') as f: json.dump(train_list, f, indent=4)
-    with open(fv, 'w') as f: json.dump(val_list, f, indent=4)
+    with open(ft, 'w') as f: json.dump(train_slice, f, indent=4)
+    with open(fv, 'w') as f: json.dump(val_slice, f, indent=4)
     
-    return ft, fv, len(train_list)
+    return ft, fv, len(train_slice)
 
 def train_worker(args):
     device = torch.device('cuda:0') 
@@ -89,29 +70,25 @@ def train_worker(args):
 
     writer = SummaryWriter(str(log_dir))
 
-    splits_dir = ROOT_DATA_DIR / args.target / "6_patches_final" / "splits"
+    # Path ai JSON creati da Modello_2
+    splits_dir = ROOT_DATA_DIR / args.target / "8_dataset_split" / "splits_json"
+    
+    if not splits_dir.exists():
+        sys.exit(f"❌ Splits non trovati in {splits_dir}. Esegui Modello_2.")
+
     json_train, json_val, num_samples = create_partitioned_json(splits_dir, rank, 10)
     
-    # CONFIGURAZIONE AGGIORNATA
-    BATCH_SIZE = 2      # BATCH FISICO (Basso)
-    ACCUM_STEPS = 16    # ACCUMULO AUMENTATO (Batch Effettivo = 32)
-    
-    # GRAFICI TENSORBOARD OGNI 3 EPOCHE
+    BATCH_SIZE = 2      
+    ACCUM_STEPS = 16    
     LOG_INTERVAL = 3    
-    # IMMAGINI PREVIEW OGNI 10 EPOCHE
     IMAGE_LOG_INTERVAL = 10
-    # MODIFICA: CHECKPOINT OGNI 10 EPOCHE
     CHECKPOINT_INTERVAL = 10
     
-    print(f"📦 Dataset: {len(json.load(open(json_train, 'r')))} coppie da {json_train.name}")
-    print(f"📦 Dataset: {len(json.load(open(json_val, 'r')))} coppie da {json_val.name}")
-    print(f"🔧 Configurazione: Batch Fisico={BATCH_SIZE}, Accumulo={ACCUM_STEPS} (Effettivo=32)")
-
     train_ds = AstronomicalDataset(json_train, base_path=PROJECT_ROOT, augment=True)
     val_ds = AstronomicalDataset(json_val, base_path=PROJECT_ROOT, augment=False)
     
-    train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True, num_workers=1, pin_memory=False)
-    val_loader = DataLoader(val_ds, batch_size=1, shuffle=False, num_workers=0)
+    train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True, num_workers=2, pin_memory=True)
+    val_loader = DataLoader(val_ds, batch_size=1, shuffle=False, num_workers=1)
 
     model = HybridSuperResolutionModel(smoothing='balanced', device=device, output_size=512).to(device)
     optimizer = optim.AdamW(model.parameters(), lr=2e-4, weight_decay=1e-4)
@@ -120,16 +97,11 @@ def train_worker(args):
 
     TOTAL_EPOCHS = 150 
     
-    pbar = tqdm(range(TOTAL_EPOCHS), desc=f"GPU {rank}", position=rank, leave=True,
-                bar_format="{desc}: Ep {n_fmt} | {postfix}")
+    pbar = tqdm(range(TOTAL_EPOCHS), desc=f"GPU {rank}", position=rank, leave=True)
 
     for epoch in pbar:
         model.train()
-        
-        acc_loss_total = 0.0
-        acc_loss_l1 = 0.0
-        acc_loss_astro = 0.0
-        acc_loss_perc = 0.0
+        acc_loss = 0.0
         
         optimizer.zero_grad()
         
@@ -149,78 +121,46 @@ def train_worker(args):
                 scaler.update()
                 optimizer.zero_grad()
             
-            current_val = loss.item()
-            acc_loss_total += current_val
-            acc_loss_l1 += loss_dict['l1'].item()
-            acc_loss_astro += loss_dict['astro'].item()
-            acc_loss_perc += loss_dict['perceptual'].item()
-
-            # Aggiorna la barra TQDM in tempo reale (solo testo, niente log su disco)
+            acc_loss += loss.item()
             if i % 10 == 0:
-                img_processed = (i + 1) * BATCH_SIZE
-                pbar.set_postfix_str(f"Img {img_processed}/{num_samples} | L: {current_val:.4f}")
+                pbar.set_postfix_str(f"Loss: {loss.item():.4f}")
 
-        # --- LOGGING & VALIDATION (OGNI LOG_INTERVAL EPOCHE) ---
+        # LOGGING
         if epoch % LOG_INTERVAL == 0:
+            writer.add_scalar('Train/Loss', acc_loss / len(train_loader), epoch)
             
-            # 1. Logga Training Loss
-            steps = len(train_loader)
-            avg_total = acc_loss_total / steps
-            
-            writer.add_scalar('Train_Main/Total_Loss', avg_total, epoch)
-            writer.add_scalar('Train_Components/L1_Pixel', acc_loss_l1 / steps, epoch)
-            writer.add_scalar('Train_Components/Astro_Star', acc_loss_astro / steps, epoch)
-            writer.add_scalar('Train_Components/Perceptual_VGG', acc_loss_perc / steps, epoch)
-
-            # 2. Esegui Validazione Completa
+            # Validazione
             model.eval()
             val_loss = 0
             metrics = Metrics()
-            preview_img = None 
-
+            preview_img = None
+            
             with torch.no_grad():
                 for j, v_batch in enumerate(val_loader):
                     v_lr = v_batch['lr'].to(device)
                     v_hr = v_batch['hr'].to(device)
-                    
                     with torch.amp.autocast('cuda'):
                         v_pred = model(v_lr)
-                        v_loss, _ = criterion(v_pred, v_hr)
-                    
-                    val_loss += v_loss.item()
+                        l, _ = criterion(v_pred, v_hr)
+                    val_loss += l.item()
                     metrics.update(v_pred.float(), v_hr.float())
                     
-                    if j == 0:
-                        # Ricampiona LR a 512x512 per il confronto visivo
+                    if j == 0 and epoch % IMAGE_LOG_INTERVAL == 0:
                         v_lr_up = torch.nn.functional.interpolate(v_lr, size=(512,512), mode='nearest')
-                        # Concatena LR, Predizione e Ground Truth
                         preview_img = torch.cat((v_lr_up, v_pred, v_hr), dim=3)
 
             res = metrics.compute()
-            avg_val_loss = val_loss / len(val_loader)
-
-            # 3. Logga Validazione su TensorBoard
-            writer.add_scalar('Validation/Loss', avg_val_loss, epoch)
-            writer.add_scalar('Validation/PSNR', res['psnr'], epoch)
-            writer.add_scalar('Validation/SSIM_SRM', res['ssim'], epoch)
+            writer.add_scalar('Val/PSNR', res['psnr'], epoch)
+            writer.add_scalar('Val/SSIM', res['ssim'], epoch)
             
-            # 4. Logga Immagini e Preview (OGNI 10 EPOCHE)
-            if preview_img is not None and epoch % IMAGE_LOG_INTERVAL == 0:
+            if preview_img is not None:
                 preview_img = preview_img.clamp(0, 1)
-                writer.add_image('Preview/Confronto', preview_img[0], epoch)
-                vutils.save_image(preview_img, img_dir / "live_preview.png", normalize=False)
+                writer.add_image('Preview', preview_img[0], epoch)
+                vutils.save_image(preview_img, img_dir / f"ep_{epoch}.png")
 
-            # Forza scrittura su disco
-            writer.flush()
-            
-            pbar.set_postfix_str(f"L:{avg_total:.3f}|V:{avg_val_loss:.3f}|SSIM:{res['ssim']:.3f}")
-
-        # SALVA CHECKPOINT OGNI 10 EPOCHE
         if epoch % CHECKPOINT_INTERVAL == 0:
-            torch.save(model.state_dict(), save_dir / f"epoch_{epoch:04d}.pth")
-            # Salva anche come 'last.pth' per la ripresa
+            torch.save(model.state_dict(), save_dir / "best_model.pth")
             torch.save(model.state_dict(), save_dir / "last.pth")
-
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()

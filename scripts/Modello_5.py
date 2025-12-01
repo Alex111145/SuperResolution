@@ -1,154 +1,99 @@
 """
-MODELLO - STEP 5: GENERAZIONE E TEST (A6000 EDITION)
-Questo script prende il dataset di TEST, genera le immagini Super-Risolte
-e le salva su disco (sia FITS che PNG di confronto).
+MODELLO 5: GENERAZIONE E TEST (TIFF 16-bit OUTPUT)
+Genera immagini SR e le salva come TIFF 16-bit per uso scientifico.
 """
-
 import sys
 import os
 import torch
 import numpy as np
 from pathlib import Path
-import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from torchvision.utils import save_image
-from astropy.io import fits
+from PIL import Image
 from tqdm import tqdm
 import json
 
-# ============================================================
-# 0. CONFIGURAZIONI & PATH (RUNPOD)
-# ============================================================
-# Abilita TF32 per velocità
 torch.backends.cuda.matmul.allow_tf32 = True
-torch.backends.cudnn.allow_tf32 = True
 
 CURRENT_SCRIPT = Path(__file__).resolve()
-PROJECT_ROOT = Path("/root/SuperResolution")
-if not PROJECT_ROOT.exists(): PROJECT_ROOT = CURRENT_SCRIPT.parent.parent
+PROJECT_ROOT = CURRENT_SCRIPT.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 ROOT_DATA_DIR = PROJECT_ROOT / "data"
 
-# --- CONFIGURAZIONE INPUT (MODIFICA QUI SE SERVE) ---
-TARGET_NAME = "M33"  # La cartella su cui testare
+TARGET_NAME = "M42" # <--- CAMBIARE SE NECESSARIO
+OUTPUT_DIR = PROJECT_ROOT / "outputs" / TARGET_NAME / "test_results_tiff"
 CHECKPOINT_PATH = PROJECT_ROOT / "outputs" / TARGET_NAME / "checkpoints" / "best.pth"
-OUTPUT_DIR = PROJECT_ROOT / "outputs" / TARGET_NAME / "test_results"
 
-SCALE = 4        # (512 / 80)
-SMOOTHING = 'balanced'
-# ============================================================
-
-# Import Moduli
 try:
     from src.architecture import HybridSuperResolutionModel
-    from src.metrics import Metrics
     from src.dataset import AstronomicalDataset
+    from src.metrics import Metrics
 except ImportError:
-    sys.exit("❌ Errore Import: Assicurati di essere nella root corretta.")
+    sys.exit("❌ Errore Import src.")
 
-# ============================================================
-# 1. UTILS
-# ============================================================
-def create_test_json(split_dir):
-    test_list = []
-    # Cerca le coppie nel set di test
-    test_dir = split_dir / "test"
-    if not test_dir.exists(): return None
+def save_as_tiff16(tensor, path):
+    """Converte tensore [0,1] float in TIFF 16-bit [0,65535] uint16."""
+    # Squeeze batch/channel: [1, 1, 512, 512] -> [512, 512]
+    arr = tensor.squeeze().float().cpu().numpy()
+    arr = np.clip(arr, 0, 1)
+    arr_u16 = (arr * 65535).astype(np.uint16)
     
-    for p in sorted(test_dir.glob("pair_*")):
-        lr = p / "observatory.fits"
-        hr = p / "hubble.fits"
-        if lr.exists() and hr.exists():
-            test_list.append({"patch_id": p.name, "ground_path": str(lr), "hubble_path": str(hr)})
+    img = Image.fromarray(arr_u16, mode='I;16')
+    img.save(path)
 
-    ft = split_dir / "test_temp.json"
-    with open(ft, 'w') as f: json.dump(test_list, f)
-    return ft
-
-# ============================================================
-# 2. MAIN RUN
-# ============================================================
 def run_test():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"\n🧪 START TEST GENERATION: {TARGET_NAME}")
-    print(f"   💾 Output Folder: {OUTPUT_DIR}")
+    print(f"\n🧪 TEST GENERATION (TIFF): {TARGET_NAME}")
     
-    # Setup Cartelle Output
-    (OUTPUT_DIR / "fits").mkdir(parents=True, exist_ok=True)
-    (OUTPUT_DIR / "comparison_png").mkdir(parents=True, exist_ok=True)
+    (OUTPUT_DIR / "tiff_science").mkdir(parents=True, exist_ok=True)
+    (OUTPUT_DIR / "png_preview").mkdir(parents=True, exist_ok=True)
 
-    # 1. Check Dati
-    target_dir = ROOT_DATA_DIR / TARGET_NAME
-    splits_dir = target_dir / "6_patches_aligned" / "splits"
+    # Usa il test.json creato da Modello_2
+    splits_dir = ROOT_DATA_DIR / TARGET_NAME / "8_dataset_split" / "splits_json"
+    test_json = splits_dir / "test.json"
     
-    if not CHECKPOINT_PATH.exists():
-        sys.exit(f"❌ Checkpoint mancante: {CHECKPOINT_PATH}")
-        
-    json_file = create_test_json(splits_dir)
-    if not json_file:
-        sys.exit("❌ Cartella 'test' non trovata negli splits.")
+    if not test_json.exists():
+        # Fallback: usa val.json se test non esiste
+        test_json = splits_dir / "val.json"
+        print("⚠️ Test set non trovato, uso Validation set.")
 
-    # 2. Dataset Loader
-    test_ds = AstronomicalDataset(json_file, base_path=PROJECT_ROOT, augment=False)
-    test_loader = DataLoader(test_ds, batch_size=1, shuffle=False, num_workers=4)
+    # Dataset Loader (TIFF Aware)
+    test_ds = AstronomicalDataset(test_json, base_path=PROJECT_ROOT, augment=False)
+    test_loader = DataLoader(test_ds, batch_size=1, shuffle=False)
     
-    # 3. Carica Modello
-    print("   🔧 Caricamento Modello...")
-    model = HybridSuperResolutionModel(
-        smoothing=SMOOTHING, 
-        device=device,
-        output_size=512
-    ).to(device)
-    
-    checkpoint = torch.load(CHECKPOINT_PATH, map_location=device)
-    model.load_state_dict(checkpoint)
+    # Modello
+    model = HybridSuperResolutionModel(smoothing='balanced', device=device, output_size=512).to(device)
+    try:
+        model.load_state_dict(torch.load(CHECKPOINT_PATH, map_location=device))
+        print("✅ Pesi caricati.")
+    except:
+        print("❌ Pesi non trovati.")
+        return
+
     model.eval()
-
-    # 4. Loop di Generazione
-    metrics_calc = Metrics()
-    print(f"   🚀 Generazione di {len(test_loader)} immagini...")
+    metrics = Metrics()
     
     with torch.no_grad():
         for i, batch in enumerate(tqdm(test_loader)):
             lr = batch['lr'].to(device)
             hr = batch['hr'].to(device)
             
-            # INFERENZA
             with torch.amp.autocast('cuda'):
                 sr = model(lr)
             
-            # Calcolo Metriche
-            metrics_calc.update(sr, hr)
+            metrics.update(sr, hr)
             
-            # --- SALVATAGGIO RISULTATI ---
+            # SALVA TIFF 16-BIT (Dati Scientifici)
+            save_as_tiff16(sr, OUTPUT_DIR / "tiff_science" / f"sr_{i:04d}.tiff")
             
-            # A. Salva FITS Scientifico (Solo il risultato AI)
-            # .squeeze() toglie dimensioni batch/channel -> [512, 512]
-            sr_numpy = sr.squeeze().float().cpu().numpy()
-            fits_path = OUTPUT_DIR / "fits" / f"result_{i:04d}.fits"
-            fits.PrimaryHDU(data=sr_numpy).writeto(fits_path, overwrite=True)
-            
-            # B. Salva PNG Confronto (Input | AI | Target)
-            # Upscale semplice dell'input per metterlo a confronto (Nearest Neighbor)
-            lr_up = F.interpolate(lr, size=(512,512), mode='nearest')
-            
-            # Unisci le 3 immagini in una striscia orizzontale
-            comparison = torch.cat((lr_up, sr, hr), dim=3)
-            
-            png_path = OUTPUT_DIR / "comparison_png" / f"compare_{i:04d}.png"
-            save_image(comparison, png_path, normalize=False)
+            # SALVA PNG PREVIEW (Visivo)
+            lr_up = torch.nn.functional.interpolate(lr, size=(512,512), mode='nearest')
+            comp = torch.cat((lr_up, sr, hr), dim=3)
+            save_image(comp, OUTPUT_DIR / "png_preview" / f"comp_{i:04d}.png")
 
-    # 5. Risultati Finali
-    final_metrics = metrics_calc.compute()
-    print("\n" + "="*50)
-    print("📊 REPORT FINALE")
-    print("="*50)
-    print(f"   PSNR Medio: {final_metrics['psnr']:.2f} dB")
-    print(f"   SSIM Medio: {final_metrics['ssim']:.4f}")
-    print(f"   📂 File salvati in: {OUTPUT_DIR}")
-    
-    # Pulizia
-    if json_file.exists(): json_file.unlink()
+    res = metrics.compute()
+    print(f"📊 Risultati: PSNR {res['psnr']:.2f} | SSIM {res['ssim']:.4f}")
+    print(f"📂 Output: {OUTPUT_DIR}")
 
 if __name__ == "__main__":
     run_test()
