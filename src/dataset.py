@@ -1,82 +1,71 @@
-"""
-Dataset per Super-Resolution Astronomica (TIFF 16-bit EDITION)
-Carica immagini TIFF 16-bit pre-normalizzate e le converte in Tensori [0, 1].
-"""
-
 import torch
-from torch.utils.data import Dataset
-from pathlib import Path
-import json
-import numpy as np
-import random
-from PIL import Image
+import torch.nn as nn
+import torch.nn.functional as F
+import torchvision.models as models
 
-class AstronomicalDataset(Dataset):
-    """
-    Dataset per caricare coppie LR-HR da file TIFF 16-bit.
-    """
-    
-    def __init__(self, split_file, base_path, augment=True):
-        self.base_path = Path(base_path)
-        self.augment = augment
+class CharbonnierLoss(nn.Module):
+    """L1 Loss robusta (migliore per Super-Resolution rispetto a L1 standard)."""
+    def __init__(self, eps=1e-6):
+        super(CharbonnierLoss, self).__init__()
+        self.eps = eps
+
+    def forward(self, x, y):
+        diff = x - y
+        loss = torch.sqrt(diff * diff + self.eps)
+        return torch.mean(loss)
+
+class CombinedLoss(nn.Module):
+    def __init__(self, l1_w=1.0, perceptual_w=0.05, astro_w=0.05):
+        super().__init__()
+        # PESI MODIFICATI: Astro ridotto drasticamente per stabilizzare l'inizio
+        self.weights = (l1_w, perceptual_w, astro_w)
         
-        # Carica il JSON con le coppie
-        with open(split_file, 'r') as f:
-            self.pairs = json.load(f)
+        # Loss principale (Ottimizzazione)
+        self.char = CharbonnierLoss()
         
-        # print(f"📦 Dataset: {len(self.pairs)} coppie da {Path(split_file).name}")
-    
-    def _load_tiff(self, path):
-        """Carica un TIFF 16-bit e lo converte in float32 [0, 65535]."""
-        if Path(path).is_absolute():
-            file_path = Path(path)
-        else:
-            file_path = self.base_path / path
+        # VGG per Perceptual Loss (Feature Extractor)
+        vgg19 = models.vgg19(weights='DEFAULT').features
+        self.vgg = nn.Sequential(*list(vgg19.children())[:18]).eval()
+        
+        for p in self.vgg.parameters(): 
+            p.requires_grad = False
             
-        try:
-            # Caricamento con PIL
-            img = Image.open(file_path)
-            # Conversione in Numpy Array
-            data = np.array(img, dtype=np.float32)
-            return data
-        except Exception as e:
-            print(f"⚠️ Errore caricamento {file_path.name}: {e}")
-            return np.zeros((64, 64), dtype=np.float32)
+        # Normalizzazione ImageNet per VGG
+        self.register_buffer('mean', torch.tensor([0.485, 0.456, 0.406]).view(1,3,1,1))
+        self.register_buffer('std', torch.tensor([0.229, 0.224, 0.225]).view(1,3,1,1))
 
-    def __getitem__(self, idx):
-        pair = self.pairs[idx]
+    def forward(self, pred, target):
+        # 1. Charbonnier Loss (usata per il training perché più stabile)
+        char_loss = self.char(pred, target)
         
-        # 1. Carica TIFF (Valori 0 -> 65535)
-        # Nota: I file sono già stati normalizzati nello step precedente
-        lr = self._load_tiff(pair['ground_path'])
-        hr = self._load_tiff(pair['hubble_path'])
+        # 2. L1 Loss Pura (calcolata SOLO per i GRAFICI, non usata per il gradiente)
+        with torch.no_grad():
+            l1_raw = F.l1_loss(pred, target)
         
-        # 2. Scaling [0, 1] per la Rete Neurale
-        # Essendo uint16, il massimo teorico è 65535.0
-        lr = lr / 65535.0
-        hr = hr / 65535.0
+        # 3. Astro Loss (Charbonnier pesata sulle stelle)
+        diff = torch.abs(pred - target)
+        # Peso ridotto sulle stelle (5x invece di 10x) per evitare esplosioni
+        weight_map = 1.0 + 5.0 * target 
+        astro_loss = torch.mean(torch.sqrt(diff * diff + 1e-6) * weight_map)
         
-        # 3. Data Augmentation
-        if self.augment:
-            if random.random() < 0.5:
-                lr = np.flipud(lr).copy()
-                hr = np.flipud(hr).copy()
-            if random.random() < 0.5:
-                lr = np.fliplr(lr).copy()
-                hr = np.fliplr(hr).copy()
-            k = random.randint(0, 3)
-            if k > 0:
-                lr = np.rot90(lr, k).copy()
-                hr = np.rot90(hr, k).copy()
+        # 4. Perceptual Loss (VGG)
+        # Clamp a [0,1] per stabilità numerica nel VGG
+        pred_clamped = pred.clamp(0, 1)
+        target_clamped = target.clamp(0, 1)
         
-        # 4. Contiguità e Tensori
-        lr = np.ascontiguousarray(lr)
-        hr = np.ascontiguousarray(hr)
+        pr = (pred_clamped.repeat(1,3,1,1) - self.mean) / self.std
+        tr = (target_clamped.repeat(1,3,1,1) - self.mean) / self.std
         
-        lr_tensor = torch.from_numpy(lr).unsqueeze(0) # [1, H, W]
-        hr_tensor = torch.from_numpy(hr).unsqueeze(0) # [1, H, W]
+        perc_loss = F.l1_loss(self.vgg(pr), self.vgg(tr))
         
-        return {'lr': lr_tensor, 'hr': hr_tensor}
-    
-    def __len__(self):
-        return len(self.pairs)
+        # Somma Ponderata (usiamo char_loss per il backprop, non l1_raw)
+        total_loss = (self.weights[0] * char_loss + 
+                      self.weights[1] * perc_loss + 
+                      self.weights[2] * astro_loss)
+        
+        return total_loss, {
+            'char': char_loss, 
+            'l1_raw': l1_raw,       # <--- RIPRISTINATO PER IL GRAFICO
+            'astro': astro_loss, 
+            'perceptual': perc_loss
+        }
