@@ -3,10 +3,6 @@ import torch.nn.functional as F
 from math import exp
 
 def ssim_torch(img1, img2, window_size=11):
-    """
-    Calcola SSIM usando convoluzioni PyTorch.
-    Supporta batch e canali multipli.
-    """
     c = img1.size(1)
     gauss = torch.Tensor([exp(-(x - window_size//2)**2/float(2*1.5**2)) for x in range(window_size)])
     win = (gauss/gauss.sum()).unsqueeze(1).mm((gauss/gauss.sum()).unsqueeze(0)).unsqueeze(0).unsqueeze(0).expand(c,1,window_size,window_size).type_as(img1)
@@ -22,7 +18,6 @@ class Metrics:
     def __init__(self): self.reset()
     def reset(self): self.psnr = 0.0; self.ssim = 0.0; self.count = 0
     def update(self, p, t):
-        # Assicuriamoci che siano nel range [0,1]
         p = p.clamp(0, 1)
         t = t.clamp(0, 1)
         

@@ -32,7 +32,7 @@ class HybridSuperResolutionModel(nn.Module):
         self.output_size = output_size
         
         if RRDBNet is None: 
-            raise ImportError("BasicSR mancante. Verifica 'models/BasicSR'.")
+            raise ImportError("BasicSR mancante.")
         
         self.stage1 = RRDBNet(num_in_ch=1, num_out_ch=1, num_feat=64, num_block=23, num_grow_ch=32, scale=2)
         
@@ -41,20 +41,14 @@ class HybridSuperResolutionModel(nn.Module):
         
         if HAT_Arch:
             try:
-                # =========================================================
-                # CONFIGURAZIONE H200 (LOW MEMORY)
-                # embed_dim=120 (Divisibile per 6). Batch 2.
-                # =========================================================
                 self.stage2 = HAT_Arch(
                     img_size=64, 
                     patch_size=1, 
                     in_chans=1, 
-                    
-                    embed_dim=120,           # RIDOTTO A 120 (120/6=20 OK)
+                    embed_dim=120,
                     depths=[6, 6, 6, 6, 6, 6], 
                     num_heads=[6, 6, 6, 6, 6, 6], 
                     window_size=16,          
-                    
                     compress_ratio=3, 
                     squeeze_factor=30, 
                     conv_scale=0.01, 
@@ -67,9 +61,9 @@ class HybridSuperResolutionModel(nn.Module):
                     resi_connection='1conv'
                 )
                 self.has_stage2 = True
-                print("   ✅ HAT Model: Configurazione 'Light-120' (Memory Safe).")
+                print("   ✅ HAT: Light-120 (Memory Safe)")
             except Exception as e: 
-                print(f"⚠️ Errore inizializzazione HAT: {e}. Uso solo Stage 1.")
+                print(f"⚠️ HAT Error: {e}. Solo Stage 1.")
 
         if smoothing != 'none':
             self.s1 = AntiCheckerboardLayer(smoothing)
