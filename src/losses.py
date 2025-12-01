@@ -15,16 +15,14 @@ class CharbonnierLoss(nn.Module):
         return torch.mean(loss)
 
 class CombinedLoss(nn.Module):
-    def __init__(self, l1_w=1.0, perceptual_w=0.05, astro_w=0.2):
+    def __init__(self, l1_w=1.0, perceptual_w=0.05, astro_w=0.05):
         super().__init__()
-        # Pesi ricalibrati: Meno peso su astro/perceptual all'inizio per favorire la convergenza
         self.weights = (l1_w, perceptual_w, astro_w)
         
-        # Uso Charbonnier invece di L1 standard
+        # Loss principale (Ottimizzazione)
         self.char = CharbonnierLoss()
         
         # VGG per Perceptual Loss (Feature Extractor)
-        # Usiamo i layer fino al 34 (relu5_4) o 18 (relu3_4)
         vgg19 = models.vgg19(weights='DEFAULT').features
         self.vgg = nn.Sequential(*list(vgg19.children())[:18]).eval()
         
@@ -36,22 +34,22 @@ class CombinedLoss(nn.Module):
         self.register_buffer('std', torch.tensor([0.229, 0.224, 0.225]).view(1,3,1,1))
 
     def forward(self, pred, target):
-        # 1. Pixel Loss (Charbonnier) - Fondamentale per il fondo nero
+        # 1. Charbonnier Loss
         char_loss = self.char(pred, target)
         
-        # 2. Astro Loss (Penalizza errori sulle stelle)
-        # Usiamo Charbonnier pesato invece di L1 raw
+        # 2. L1 Loss Pura (solo per grafici)
+        with torch.no_grad():
+            l1_raw = F.l1_loss(pred, target)
+        
+        # 3. Astro Loss
         diff = torch.abs(pred - target)
-        # Il peso (1 + 10*target) penalizza di più le aree luminose (stelle)
-        weight_map = 1.0 + 10.0 * target
+        weight_map = 1.0 + 5.0 * target 
         astro_loss = torch.mean(torch.sqrt(diff * diff + 1e-6) * weight_map)
         
-        # 3. Perceptual Loss (VGG)
-        # IMPORTANTE: Clampiamo a [0,1] per evitare che VGG impazzisca con valori fuori range
+        # 4. Perceptual Loss
         pred_clamped = pred.clamp(0, 1)
         target_clamped = target.clamp(0, 1)
         
-        # Convertiamo 1 canale -> 3 canali per VGG
         pr = (pred_clamped.repeat(1,3,1,1) - self.mean) / self.std
         tr = (target_clamped.repeat(1,3,1,1) - self.mean) / self.std
         
@@ -64,6 +62,7 @@ class CombinedLoss(nn.Module):
         
         return total_loss, {
             'char': char_loss, 
+            'l1_raw': l1_raw,
             'astro': astro_loss, 
             'perceptual': perc_loss
         }

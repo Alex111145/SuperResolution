@@ -1,71 +1,92 @@
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
-import torchvision.models as models
+from torch.utils.data import Dataset
+from pathlib import Path
+import json
+import numpy as np
+import random
+from PIL import Image
 
-class CharbonnierLoss(nn.Module):
-    """L1 Loss robusta (migliore per Super-Resolution rispetto a L1 standard)."""
-    def __init__(self, eps=1e-6):
-        super(CharbonnierLoss, self).__init__()
-        self.eps = eps
-
-    def forward(self, x, y):
-        diff = x - y
-        loss = torch.sqrt(diff * diff + self.eps)
-        return torch.mean(loss)
-
-class CombinedLoss(nn.Module):
-    def __init__(self, l1_w=1.0, perceptual_w=0.05, astro_w=0.05):
-        super().__init__()
-        # PESI MODIFICATI: Astro ridotto drasticamente per stabilizzare l'inizio
-        self.weights = (l1_w, perceptual_w, astro_w)
+class AstronomicalDataset(Dataset):
+    """
+    Dataset per caricare coppie LR-HR da file TIFF 16-bit.
+    Normalizza correttamente da [0, 65535] a [0.0, 1.0].
+    """
+    def __init__(self, split_file, base_path, augment=True):
+        self.base_path = Path(base_path)
+        self.augment = augment
         
-        # Loss principale (Ottimizzazione)
-        self.char = CharbonnierLoss()
-        
-        # VGG per Perceptual Loss (Feature Extractor)
-        vgg19 = models.vgg19(weights='DEFAULT').features
-        self.vgg = nn.Sequential(*list(vgg19.children())[:18]).eval()
-        
-        for p in self.vgg.parameters(): 
-            p.requires_grad = False
+        # Caricamento lista coppie dal JSON
+        with open(split_file, 'r') as f:
+            self.pairs = json.load(f)
             
-        # Normalizzazione ImageNet per VGG
-        self.register_buffer('mean', torch.tensor([0.485, 0.456, 0.406]).view(1,3,1,1))
-        self.register_buffer('std', torch.tensor([0.229, 0.224, 0.225]).view(1,3,1,1))
+        print(f"📦 Dataset caricato: {len(self.pairs)} coppie da {Path(split_file).name}")
 
-    def forward(self, pred, target):
-        # 1. Charbonnier Loss (usata per il training perché più stabile)
-        char_loss = self.char(pred, target)
+    def _load_tiff_as_tensor(self, path):
+        """Carica un TIFF 16-bit e lo converte in Tensore Float [0-1]."""
+        try:
+            # 1. Carica immagine con PIL (gestisce nativamente i 16-bit)
+            img = Image.open(path)
+            
+            # 2. Converti in array Numpy Float32
+            arr = np.array(img, dtype=np.float32)
+            
+            # 3. NORMALIZZAZIONE CRUCIALE (16-bit -> 0..1)
+            arr = arr / 65535.0
+            
+            # 4. Converti in Tensore PyTorch
+            tensor = torch.from_numpy(arr)
+            
+            # 5. Aggiungi dimensione canale se manca: [H, W] -> [1, H, W]
+            if tensor.ndim == 2:
+                tensor = tensor.unsqueeze(0)
+                
+            return tensor
+            
+        except Exception as e:
+            print(f"❌ Errore caricamento {path}: {e}")
+            # Ritorna un tensore nero di emergenza per non crashare
+            return torch.zeros(1, 128, 128)
+
+    def __getitem__(self, idx):
+        pair = self.pairs[idx]
         
-        # 2. L1 Loss Pura (calcolata SOLO per i GRAFICI, non usata per il gradiente)
-        with torch.no_grad():
-            l1_raw = F.l1_loss(pred, target)
+        # Percorsi (gestisce sia assoluti che relativi)
+        path_lr = pair['ground_path']
+        path_hr = pair['hubble_path']
         
-        # 3. Astro Loss (Charbonnier pesata sulle stelle)
-        diff = torch.abs(pred - target)
-        # Peso ridotto sulle stelle (5x invece di 10x) per evitare esplosioni
-        weight_map = 1.0 + 5.0 * target 
-        astro_loss = torch.mean(torch.sqrt(diff * diff + 1e-6) * weight_map)
-        
-        # 4. Perceptual Loss (VGG)
-        # Clamp a [0,1] per stabilità numerica nel VGG
-        pred_clamped = pred.clamp(0, 1)
-        target_clamped = target.clamp(0, 1)
-        
-        pr = (pred_clamped.repeat(1,3,1,1) - self.mean) / self.std
-        tr = (target_clamped.repeat(1,3,1,1) - self.mean) / self.std
-        
-        perc_loss = F.l1_loss(self.vgg(pr), self.vgg(tr))
-        
-        # Somma Ponderata (usiamo char_loss per il backprop, non l1_raw)
-        total_loss = (self.weights[0] * char_loss + 
-                      self.weights[1] * perc_loss + 
-                      self.weights[2] * astro_loss)
-        
-        return total_loss, {
-            'char': char_loss, 
-            'l1_raw': l1_raw,       # <--- RIPRISTINATO PER IL GRAFICO
-            'astro': astro_loss, 
-            'perceptual': perc_loss
-        }
+        # Se sono relativi, li collega alla root
+        if not Path(path_lr).is_absolute(): path_lr = self.base_path / path_lr
+        if not Path(path_hr).is_absolute(): path_hr = self.base_path / path_hr
+
+        # Caricamento e Normalizzazione
+        lr_tensor = self._load_tiff_as_tensor(path_lr)
+        hr_tensor = self._load_tiff_as_tensor(path_hr)
+
+        # --- DATA AUGMENTATION (Flip/Rotate) ---
+        if self.augment:
+            # Random Horizontal Flip
+            if random.random() > 0.5:
+                lr_tensor = torch.flip(lr_tensor, [-1])
+                hr_tensor = torch.flip(hr_tensor, [-1])
+                
+            # Random Vertical Flip
+            if random.random() > 0.5:
+                lr_tensor = torch.flip(lr_tensor, [-2])
+                hr_tensor = torch.flip(hr_tensor, [-2])
+                
+            # Random 90-degree Rotation
+            k = random.randint(0, 3)
+            if k > 0:
+                lr_tensor = torch.rot90(lr_tensor, k, [-2, -1])
+                hr_tensor = torch.rot90(hr_tensor, k, [-2, -1])
+
+        # Controllo di integrità (opzionale ma utile)
+        if torch.isnan(lr_tensor).any() or torch.isnan(hr_tensor).any():
+            print(f"⚠️ NaN rilevati nel sample {idx}")
+            lr_tensor = torch.nan_to_num(lr_tensor)
+            hr_tensor = torch.nan_to_num(hr_tensor)
+
+        return {'lr': lr_tensor, 'hr': hr_tensor}
+
+    def __len__(self):
+        return len(self.pairs)
