@@ -3,13 +3,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 from .env_setup import import_external_archs
 
-# Tenta l'importazione delle architetture esterne
 RRDBNet, HAT_Arch = import_external_archs()
 
 class AntiCheckerboardLayer(nn.Module):
     def __init__(self, mode='balanced'):
         super().__init__()
-        # Kernel per rimuovere artefatti a scacchiera
         if mode == 'strong':
             k, p, s = 7, 3, 1600.0
             bk = [[1,6,15,20,15,6,1],[6,36,90,120,90,36,6],[15,90,225,300,225,90,15],
@@ -33,33 +31,29 @@ class HybridSuperResolutionModel(nn.Module):
         super().__init__()
         self.output_size = output_size
         
-        # STAGE 1: RRDBNet (BasicSR)
         if RRDBNet is None: 
             raise ImportError("BasicSR mancante. Verifica 'models/BasicSR'.")
         
-        # RRDBNet Configurazione Standard
         self.stage1 = RRDBNet(num_in_ch=1, num_out_ch=1, num_feat=64, num_block=23, num_grow_ch=32, scale=2)
         
-        # STAGE 2: HAT (Transformer)
         self.has_stage2 = False
         self.stage2 = nn.Identity()
         
         if HAT_Arch:
             try:
                 # =========================================================
-                # CONFIGURAZIONE H200 (HIGH PERFORMANCE)
-                # Abbiamo 141GB VRAM: Usiamo parametri "Large" per massima qualità.
+                # CONFIGURAZIONE H200 (LOW MEMORY)
+                # embed_dim=120 (Divisibile per 6). Batch 2.
                 # =========================================================
                 self.stage2 = HAT_Arch(
                     img_size=64, 
                     patch_size=1, 
                     in_chans=1, 
                     
-                    # Parametri Maggiorati (Standard HAT-L)
-                    embed_dim=180,           # Era 120 (Ridotto) -> Ora 180 (Full)
+                    embed_dim=120,           # RIDOTTO A 120 (120/6=20 OK)
                     depths=[6, 6, 6, 6, 6, 6], 
                     num_heads=[6, 6, 6, 6, 6, 6], 
-                    window_size=16,          # Era 8 (Ridotto) -> Ora 16 (Full Context)
+                    window_size=16,          
                     
                     compress_ratio=3, 
                     squeeze_factor=30, 
@@ -73,11 +67,10 @@ class HybridSuperResolutionModel(nn.Module):
                     resi_connection='1conv'
                 )
                 self.has_stage2 = True
-                print("   ✅ HAT Model: Configurazione 'Large' attivata (H200 Mode).")
+                print("   ✅ HAT Model: Configurazione 'Light-120' (Memory Safe).")
             except Exception as e: 
                 print(f"⚠️ Errore inizializzazione HAT: {e}. Uso solo Stage 1.")
 
-        # Smoothing Layers (Anti-artefatti)
         if smoothing != 'none':
             self.s1 = AntiCheckerboardLayer(smoothing)
             self.s2 = AntiCheckerboardLayer(smoothing)
@@ -88,18 +81,13 @@ class HybridSuperResolutionModel(nn.Module):
         self.to(device)
 
     def forward(self, x):
-        # Stage 1: BasicSR (Upscale x2)
         x = self.stage1(x)
         x = self.s1(x)
-        
-        # Stage 2: HAT (Upscale x2 -> Totale x4) se disponibile
         if self.has_stage2: 
             x = self.stage2(x)
             x = self.s2(x)
         
-        # Upscale Finale Arbitrario (Bicubic) per raggiungere esattamente output_size
         if x.shape[-1] != self.output_size:
             x = F.interpolate(x, size=(self.output_size, self.output_size), 
                               mode='bicubic', align_corners=False, antialias=True)
-        
         return self.sf(x)
