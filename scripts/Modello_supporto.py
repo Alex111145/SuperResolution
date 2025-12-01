@@ -1,6 +1,6 @@
 """
-TRAINING WORKER (NVIDIA H200 - VISUAL EDITION)
-Include barre di avanzamento per Training e Analisi (Validazione).
+TRAINING WORKER (NVIDIA H200 - MAX SATURATION)
+Ottimizzato per VRAM 60% -> 90% e CPU 30% -> 80%+
 """
 import os
 import cv2
@@ -79,13 +79,14 @@ def train_worker(args):
 
     json_train, json_val, num_samples = create_partitioned_json(splits_dir, rank, 1)
     
-    # --- CONFIGURAZIONE SAFE (H200) ---
-    BATCH_SIZE = 2       
-    ACCUM_STEPS = 16     
+    # --- CONFIGURAZIONE PERFORMANCE ESTREMA (H200) ---
+    # Target: Saturare 141GB VRAM e CPU 100%
+    BATCH_SIZE = 3      # Aumentato da 2 a 3 (+50% carico VRAM)
+    ACCUM_STEPS = 20     # 3 * 11 = 33 Batch Effettivo
     
     LOG_INTERVAL = 10    
-    IMAGE_LOG_INTERVAL = 100 
-    CHECKPOINT_INTERVAL = 10
+    IMAGE_LOG_INTERVAL = 1 
+    CHECKPOINT_INTERVAL = 1
     TOTAL_EPOCHS = 150
     LR = 4e-4           
     
@@ -96,11 +97,13 @@ def train_worker(args):
         train_ds, 
         batch_size=BATCH_SIZE, 
         shuffle=True, 
-        num_workers=8, 
+        # CPU TUNING:
+        num_workers=16,    # Raddoppiato (era 8) per alzare il carico CPU > 30%
         pin_memory=True,
-        prefetch_factor=2
+        prefetch_factor=4, # Bufferizziamo più dati per non far attendere la GPU
+        persistent_workers=True # Mantiene i worker vivi tra le epoche
     )
-    val_loader = DataLoader(val_ds, batch_size=1, shuffle=False, num_workers=4)
+    val_loader = DataLoader(val_ds, batch_size=1, shuffle=False, num_workers=8)
 
     model = HybridSuperResolutionModel(smoothing='balanced', device=device, output_size=512).to(device)
     
@@ -110,10 +113,9 @@ def train_worker(args):
     
     scaler = torch.amp.GradScaler('cuda')
 
-    print(f"🔥 Configurazione H200 (Visual): Batch={BATCH_SIZE}, Accum={ACCUM_STEPS}")
+    print(f"🔥 Configurazione H200 (Saturated): Batch={BATCH_SIZE}, Workers=16, Prefetch=4")
     print(f"📊 Training Samples: {len(train_ds)} | Validation Samples: {len(val_ds)}")
 
-    # Loop Epoche Standard (senza tqdm esterno per pulizia)
     for epoch in range(TOTAL_EPOCHS):
         current_epoch = epoch + 1
         
@@ -122,7 +124,7 @@ def train_worker(args):
         acc_loss_total = 0.0
         optimizer.zero_grad()
         
-        # Barra di avanzamento TRAINING
+        # Barra Verde per Training
         train_pbar = tqdm(enumerate(train_loader), total=len(train_loader), 
                           desc=f"Epoca {current_epoch}/{TOTAL_EPOCHS} [Train]", 
                           leave=True, ncols=120, colour='green')
@@ -147,13 +149,11 @@ def train_worker(args):
             
             loss_val = loss.item()
             acc_loss_total += loss_val
-            
-            # Aggiorna la barra con la loss corrente
             train_pbar.set_postfix(loss=f"{loss_val:.4f}", lr=f"{optimizer.param_groups[0]['lr']:.2e}")
 
         scheduler.step()
 
-        # === FASE DI ANALISI / VALIDAZIONE ===
+        # === FASE DI ANALISI ===
         if epoch % LOG_INTERVAL == 0:
             writer.add_scalar('Train/Loss', acc_loss_total / len(train_loader), epoch)
             writer.add_scalar('Train/LR', optimizer.param_groups[0]['lr'], epoch)
@@ -161,7 +161,7 @@ def train_worker(args):
             model.eval()
             metrics = Metrics()
             
-            # Barra di avanzamento ANALISI
+            # Barra Ciano per Analisi
             val_pbar = tqdm(val_loader, total=len(val_loader), 
                             desc=f"Epoca {current_epoch} [Analisi]", 
                             leave=True, ncols=120, colour='cyan')
@@ -177,9 +177,7 @@ def train_worker(args):
                     metrics.update(v_pred.float(), v_hr.float())
             
             res = metrics.compute()
-            
-            # Stampa risultati analisi
-            tqdm.write(f"📊 RISULTATI ANALISI (Epoca {current_epoch}): PSNR={res['psnr']:.2f} | SSIM={res['ssim']:.4f}")
+            tqdm.write(f"📊 RISULTATI ANALISI: PSNR={res['psnr']:.2f} | SSIM={res['ssim']:.4f}")
             
             writer.add_scalar('Val/PSNR', res['psnr'], epoch)
             writer.add_scalar('Val/SSIM', res['ssim'], epoch)
