@@ -1,6 +1,6 @@
 """
-TRAINING WORKER (NVIDIA H200 OPTIMIZED)
-Ampia VRAM + Tensor Cores = Max Performance.
+TRAINING WORKER (NVIDIA H200 - VISUAL EDITION)
+Include barre di avanzamento per Training e Analisi (Validazione).
 """
 import os
 import cv2
@@ -19,10 +19,8 @@ from torch.utils.tensorboard import SummaryWriter
 import traceback
 
 # === NVIDIA OPTIMIZATIONS ===
-# Abilita il benchmark: PyTorch testerà vari algoritmi convoluzionali
-# all'inizio e sceglierà il più veloce per la tua H200.
 torch.backends.cudnn.benchmark = True
-torch.backends.cudnn.allow_tf32 = True # Usa TensorFloat-32 sulle schede Ampere/Hopper
+torch.backends.cuda.matmul.allow_tf32 = True
 # ============================
 
 # Setup Path
@@ -81,16 +79,16 @@ def train_worker(args):
 
     json_train, json_val, num_samples = create_partitioned_json(splits_dir, rank, 1)
     
-    # --- CONFIGURAZIONE H200 (Extreme Performance) ---
-    BATCH_SIZE = 24      # Con 141GB VRAM, possiamo spingere. Se OOM, scendi a 16.
-    ACCUM_STEPS = 1      # Con batch così alti, spesso non serve accumulare.
+    # --- CONFIGURAZIONE SAFE (H200) ---
+    BATCH_SIZE = 2       
+    ACCUM_STEPS = 16     
+    
     LOG_INTERVAL = 10    
-    IMAGE_LOG_INTERVAL = 20
+    IMAGE_LOG_INTERVAL = 100 
     CHECKPOINT_INTERVAL = 10
     TOTAL_EPOCHS = 150
     LR = 4e-4           
     
-    # Dataset
     train_ds = AstronomicalDataset(json_train, base_path=PROJECT_ROOT, augment=True)
     val_ds = AstronomicalDataset(json_val, base_path=PROJECT_ROOT, augment=False)
     
@@ -98,37 +96,42 @@ def train_worker(args):
         train_ds, 
         batch_size=BATCH_SIZE, 
         shuffle=True, 
-        num_workers=8, # H200 mangia dati veloce, servono workers
+        num_workers=8, 
         pin_memory=True,
         prefetch_factor=2
     )
     val_loader = DataLoader(val_ds, batch_size=1, shuffle=False, num_workers=4)
 
-    # Modello
     model = HybridSuperResolutionModel(smoothing='balanced', device=device, output_size=512).to(device)
     
     optimizer = optim.AdamW(model.parameters(), lr=LR, weight_decay=1e-4, betas=(0.9, 0.99))
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=TOTAL_EPOCHS, eta_min=1e-7)
     criterion = CombinedLoss().to(device)
     
-    # Mixed Precision Scaler (Fondamentale per H200)
-    scaler = torch.cuda.amp.GradScaler()
+    scaler = torch.amp.GradScaler('cuda')
 
-    print(f"🔥 Configurazione H200: Batch={BATCH_SIZE}, AMP=ON, TF32=ON")
+    print(f"🔥 Configurazione H200 (Visual): Batch={BATCH_SIZE}, Accum={ACCUM_STEPS}")
+    print(f"📊 Training Samples: {len(train_ds)} | Validation Samples: {len(val_ds)}")
 
-    pbar = tqdm(range(TOTAL_EPOCHS), desc=f"Epochs", position=0, leave=True)
-
-    for epoch in pbar:
+    # Loop Epoche Standard (senza tqdm esterno per pulizia)
+    for epoch in range(TOTAL_EPOCHS):
+        current_epoch = epoch + 1
+        
+        # === FASE DI TRAINING ===
         model.train()
         acc_loss_total = 0.0
         optimizer.zero_grad()
         
-        for i, batch in enumerate(train_loader):
+        # Barra di avanzamento TRAINING
+        train_pbar = tqdm(enumerate(train_loader), total=len(train_loader), 
+                          desc=f"Epoca {current_epoch}/{TOTAL_EPOCHS} [Train]", 
+                          leave=True, ncols=120, colour='green')
+        
+        for i, batch in train_pbar:
             lr = batch['lr'].to(device, non_blocking=True)
             hr = batch['hr'].to(device, non_blocking=True)
             
-            # Autocast: Usa FP16/BF16 dove possibile (Velocissimo su H200)
-            with torch.cuda.amp.autocast():
+            with torch.amp.autocast('cuda'):
                 pred = model(lr)
                 loss, loss_dict = criterion(pred, hr)
                 loss_scaled = loss / ACCUM_STEPS
@@ -142,30 +145,42 @@ def train_worker(args):
                 scaler.update()
                 optimizer.zero_grad()
             
-            acc_loss_total += loss.item()
+            loss_val = loss.item()
+            acc_loss_total += loss_val
             
-            if i % 5 == 0:
-                pbar.set_postfix_str(f"Loss: {loss.item():.4f}")
+            # Aggiorna la barra con la loss corrente
+            train_pbar.set_postfix(loss=f"{loss_val:.4f}", lr=f"{optimizer.param_groups[0]['lr']:.2e}")
 
         scheduler.step()
 
+        # === FASE DI ANALISI / VALIDAZIONE ===
         if epoch % LOG_INTERVAL == 0:
             writer.add_scalar('Train/Loss', acc_loss_total / len(train_loader), epoch)
             writer.add_scalar('Train/LR', optimizer.param_groups[0]['lr'], epoch)
             
             model.eval()
             metrics = Metrics()
+            
+            # Barra di avanzamento ANALISI
+            val_pbar = tqdm(val_loader, total=len(val_loader), 
+                            desc=f"Epoca {current_epoch} [Analisi]", 
+                            leave=True, ncols=120, colour='cyan')
+            
             with torch.no_grad():
-                for v_batch in val_loader:
+                for v_batch in val_pbar:
                     v_lr = v_batch['lr'].to(device)
                     v_hr = v_batch['hr'].to(device)
                     
-                    with torch.cuda.amp.autocast():
+                    with torch.amp.autocast('cuda'):
                         v_pred = model(v_lr)
                         
                     metrics.update(v_pred.float(), v_hr.float())
             
             res = metrics.compute()
+            
+            # Stampa risultati analisi
+            tqdm.write(f"📊 RISULTATI ANALISI (Epoca {current_epoch}): PSNR={res['psnr']:.2f} | SSIM={res['ssim']:.4f}")
+            
             writer.add_scalar('Val/PSNR', res['psnr'], epoch)
             writer.add_scalar('Val/SSIM', res['ssim'], epoch)
             
