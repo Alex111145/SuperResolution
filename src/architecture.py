@@ -1,15 +1,17 @@
+"""
+Architettura Ibrida (128px -> 512px)
+File: src/architecture.py
+"""
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from .env_setup import import_external_archs
 
-# Tenta l'importazione delle architetture esterne
 RRDBNet, HAT_Arch = import_external_archs()
 
 class AntiCheckerboardLayer(nn.Module):
     def __init__(self, mode='balanced'):
         super().__init__()
-        # Kernel per rimuovere artefatti a scacchiera
         if mode == 'strong':
             k, p, s = 7, 3, 1600.0
             bk = [[1,6,15,20,15,6,1],[6,36,90,120,90,36,6],[15,90,225,300,225,90,15],
@@ -31,32 +33,32 @@ class AntiCheckerboardLayer(nn.Module):
 class HybridSuperResolutionModel(nn.Module):
     def __init__(self, output_size=512, smoothing='balanced', device='cuda'):
         super().__init__()
-        self.output_size = output_size # Dimensione target fissa (es. 512) <--- FIX CARATTERE U+00A0
+        self.output_size = output_size 
         
-        # STAGE 1: RRDBNet (BasicSR)
+        # --- STAGE 1: RRDBNet (x2) ---
+        # Input 128 -> Output 256
         if RRDBNet is None: 
-            raise ImportError("BasicSR mancante. Verifica 'models/BasicSR'.")
-        # Input 1 canale -> Output 1 canale, Scale x2
+            raise ImportError("BasicSR mancante.")
         self.stage1 = RRDBNet(num_in_ch=1, num_out_ch=1, num_feat=64, num_block=23, num_grow_ch=32, scale=2)
         
-        # STAGE 2: HAT (Transformer)
+        # --- STAGE 2: HAT (x2) ---
+        # Input 256 -> Output 512
         self.has_stage2 = False
         self.stage2 = nn.Identity()
         
         if HAT_Arch:
             try:
-                # FIX OOM: Riduzione dei parametri HAT (embed_dim 180->120, window_size 16->8)
                 self.stage2 = HAT_Arch(img_size=64, patch_size=1, in_chans=1, 
-                                       embed_dim=120, depths=[6]*6,          # RIDOTTO per OOM
-                                       num_heads=[6]*6, window_size=8,       # RIDOTTO per OOM
+                                       embed_dim=120, depths=[6]*6,
+                                       num_heads=[6]*6, window_size=8,
                                        compress_ratio=3, squeeze_factor=30, 
                                        conv_scale=0.01, overlap_ratio=0.5, mlp_ratio=2., qkv_bias=True, 
                                        upscale=2, img_range=1., upsampler='pixelshuffle', resi_connection='1conv')
                 self.has_stage2 = True
             except Exception as e: 
-                print(f"⚠️ Errore inizializzazione HAT: {e}. Uso solo Stage 1.")
+                print(f"⚠️ Errore HAT: {e}. Solo Stage 1.")
 
-        # Smoothing Layers (Anti-artefatti)
+        # Smoothing Layers
         if smoothing != 'none':
             self.s1 = AntiCheckerboardLayer(smoothing)
             self.s2 = AntiCheckerboardLayer(smoothing)
@@ -67,16 +69,18 @@ class HybridSuperResolutionModel(nn.Module):
         self.to(device)
 
     def forward(self, x):
-        # Stage 1: BasicSR (Upscale x2)
+        # x input: 128x128
+        
+        # Stage 1 (x2) -> 256x256
         x = self.stage1(x)
         x = self.s1(x)
         
-        # Stage 2: HAT (Upscale x2 -> Totale x4) se disponibile
+        # Stage 2 (x2) -> 512x512
         if self.has_stage2: 
             x = self.stage2(x)
             x = self.s2(x)
         
-        # Upscale Finale Arbitrario (Bicubic) per raggiungere esattamente output_size
+        # Safety Check Finale (Forza a 512 se qualcosa è andato storto)
         if x.shape[-1] != self.output_size:
             x = F.interpolate(x, size=(self.output_size, self.output_size), 
                               mode='bicubic', align_corners=False, antialias=True)

@@ -1,68 +1,47 @@
+"""
+Loss Functions
+File: src/losses.py
+"""
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torchvision.models as models
 
-class CharbonnierLoss(nn.Module):
-    """L1 Loss robusta (migliore per Super-Resolution rispetto a L1 standard)."""
-    def __init__(self, eps=1e-6):
-        super(CharbonnierLoss, self).__init__()
-        self.eps = eps
-
-    def forward(self, x, y):
-        diff = x - y
-        loss = torch.sqrt(diff * diff + self.eps)
-        return torch.mean(loss)
-
 class CombinedLoss(nn.Module):
-    def __init__(self, l1_w=1.0, perceptual_w=0.05, astro_w=0.05):
+    def __init__(self, l1_w=1.0, perceptual_w=0.1, astro_w=1.0):
         super().__init__()
         self.weights = (l1_w, perceptual_w, astro_w)
+        self.l1 = nn.L1Loss()
         
-        # Loss principale (Ottimizzazione)
-        self.char = CharbonnierLoss()
+        # VGG19 per Perceptual Loss
+        # Pesi 'DEFAULT' scaricano i pesi ImageNet più recenti
+        self.vgg = models.vgg19(weights='DEFAULT').features[:18].eval()
         
-        # VGG per Perceptual Loss (Feature Extractor)
-        vgg19 = models.vgg19(weights='DEFAULT').features
-        self.vgg = nn.Sequential(*list(vgg19.children())[:18]).eval()
-        
+        # Congela i parametri VGG
         for p in self.vgg.parameters(): 
             p.requires_grad = False
             
-        # Normalizzazione ImageNet per VGG
+        # Buffer per normalizzazione (ImageNet stats)
         self.register_buffer('mean', torch.tensor([0.485, 0.456, 0.406]).view(1,3,1,1))
         self.register_buffer('std', torch.tensor([0.229, 0.224, 0.225]).view(1,3,1,1))
 
     def forward(self, pred, target):
-        # 1. Charbonnier Loss
-        char_loss = self.char(pred, target)
+        # 1. L1 Loss (Pixel-wise pura)
+        l1 = self.l1(pred, target)
         
-        # 2. L1 Loss Pura (solo per grafici)
-        with torch.no_grad():
-            l1_raw = F.l1_loss(pred, target)
+        # 2. Astro Loss (Weighted L1)
+        # Penalizza di più gli errori dove il target è luminoso (stelle)
+        # (1.0 + 10.0 * target) crea una mappa di pesi
+        astro = (F.l1_loss(pred, target, reduction='none') * (1.0 + 10.0 * target)).mean()
         
-        # 3. Astro Loss
-        diff = torch.abs(pred - target)
-        weight_map = 1.0 + 5.0 * target 
-        astro_loss = torch.mean(torch.sqrt(diff * diff + 1e-6) * weight_map)
+        # 3. Perceptual Loss (VGG)
+        # VGG vuole input a 3 canali normalizzati. Replichiamo il canale B/W.
+        pr = (pred.repeat(1,3,1,1) - self.mean) / self.std
+        tr = (target.repeat(1,3,1,1) - self.mean) / self.std
+        perc = F.l1_loss(self.vgg(pr), self.vgg(tr))
         
-        # 4. Perceptual Loss
-        pred_clamped = pred.clamp(0, 1)
-        target_clamped = target.clamp(0, 1)
+        # Calcolo Totale Ponderato
+        total_loss = self.weights[0]*l1 + self.weights[1]*perc + self.weights[2]*astro
         
-        pr = (pred_clamped.repeat(1,3,1,1) - self.mean) / self.std
-        tr = (target_clamped.repeat(1,3,1,1) - self.mean) / self.std
-        
-        perc_loss = F.l1_loss(self.vgg(pr), self.vgg(tr))
-        
-        # Somma Ponderata
-        total_loss = (self.weights[0] * char_loss + 
-                      self.weights[1] * perc_loss + 
-                      self.weights[2] * astro_loss)
-        
-        return total_loss, {
-            'char': char_loss, 
-            'l1_raw': l1_raw,
-            'astro': astro_loss, 
-            'perceptual': perc_loss
-        }
+        # Restituisce Loss Totale + Dizionario per i grafici TensorBoard
+        return total_loss, {'l1': l1, 'astro': astro, 'perceptual': perc}
