@@ -1,4 +1,4 @@
-# --- Index per PyTorch con CUDA (Opzionale ma consigliato per performance) ---
+# --- Index per PyTorch con CUDA ---
 --extra-index-url https://download.pytorch.org/whl/cu118
 
 # --- Core & Data Science ---
@@ -26,6 +26,8 @@ torchaudio
 tensorboard
 einops
 timm
+# AGGIUNTA FONDAMENTALE PER SWINIR:
+basicsr>=1.4.2
 
 # --- Utilities & Data Management ---
 tqdm
