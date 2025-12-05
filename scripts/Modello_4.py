@@ -12,12 +12,28 @@ def finalize_model(target_base_name):
     print(f"🔄 FINALIZZAZIONE: {target_base_name}")
     
     outputs_dir = PROJECT_ROOT / "outputs"
-    worker_dir = outputs_dir / f"{target_base_name}_GPU_0"
     
-    if not worker_dir.exists():
-        print(f"❌ Output non trovato: {worker_dir}")
-        print("   Esegui prima Modello_3.py")
+    # --- MODIFICA: Cerca la cartella del nuovo training RRDBNet ---
+    # Priorità alla nuova versione Pure, poi fallback sulle vecchie
+    candidates = [
+        outputs_dir / f"{target_base_name}_Worker_RRDBNet_Pure", # Nuova versione
+        outputs_dir / f"{target_base_name}_Worker_HAT_Nano",      # Versione precedente
+        outputs_dir / f"{target_base_name}_GPU_0"                  # Versione originale
+    ]
+    
+    worker_dir = None
+    for c in candidates:
+        if c.exists():
+            worker_dir = c
+            break
+            
+    if worker_dir is None:
+        print(f"❌ Nessuna cartella di training trovata in {outputs_dir}")
+        print(f"   Cercavo: {[c.name for c in candidates]}")
+        print("   Esegui prima il training (Modello_3.py)")
         return
+
+    print(f"   📂 Trovata cartella training: {worker_dir.name}")
 
     ckpt_best = worker_dir / "checkpoints" / "best_model.pth"
     ckpt_last = worker_dir / "checkpoints" / "last.pth"
@@ -31,25 +47,28 @@ def finalize_model(target_base_name):
         print("   ✅ Best Model trovato")
         source_path = ckpt_best
     elif ckpt_last.exists():
-        print("   ⚠️ Uso ultimo checkpoint")
+        print("   ⚠️ Uso ultimo checkpoint (Best non trovato)")
         source_path = ckpt_last
     else:
-        print("❌ Nessun checkpoint.")
+        print("❌ Nessun file .pth trovato nei checkpoints.")
         return
 
     try:
         shutil.copy2(source_path, final_model_path)
-        print(f"   💾 Salvato: {final_model_path}")
+        print(f"   💾 Modello salvato in: {final_model_path}")
         
-        print("   🔍 Verifica...")
+        print("   🔍 Verifica compatibilità pesi...")
         state_dict = torch.load(final_model_path, map_location='cpu')
-        if 'stage1.conv_first.weight' in state_dict:
-            print("   ✅ Pesi validi (Hybrid Model)")
+        
+        # Verifica generica per RRDBNet (con o senza wrapper DataParallel)
+        keys = list(state_dict.keys())
+        if any('conv_first' in k for k in keys):
+            print("   ✅ Struttura Pesi OK (RRDBNet identificato)")
         else:
-            print("   ⚠️ Struttura incerta")
+            print("   ⚠️ Attenzione: Chiavi del modello insolite, ma procedo.")
             
     except Exception as e:
-        print(f"❌ Errore: {e}")
+        print(f"❌ Errore durante la copia: {e}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
