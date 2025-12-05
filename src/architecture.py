@@ -18,6 +18,7 @@ class HybridSuperResolutionModel(nn.Module):
         
         # CONFIGURAZIONE SWINIR LIGHTWEIGHT
         # Parametri ottimizzati per SR 4x su GPU singola/consumer
+        # Bilanciamento ideale tra VRAM e qualità per immagini astronomiche
         self.model = SwinIR_Arch(
             upscale=4,             # Upscaling 4x (128 -> 512)
             in_chans=1,            # 1 canale (Immagini BW Astronomiche)
@@ -25,7 +26,7 @@ class HybridSuperResolutionModel(nn.Module):
             window_size=8,         # Standard per SwinIR
             img_range=1.,          # Range input 0-1 (importante!)
             
-            # Configurazione "Light" (Bilanciamento VRAM/Qualità)
+            # Configurazione "Light" (Depth e Width ridotti)
             depths=[6, 6, 6, 6],   
             embed_dim=60,          
             num_heads=[6, 6, 6, 6],
@@ -40,7 +41,6 @@ class HybridSuperResolutionModel(nn.Module):
         x = self.model(x)
         
         # Safety Check: Assicuriamo che l'output sia esattamente della dimensione richiesta
-        # (A volte SwinIR può variare leggermente se l'input non è multiplo della window_size)
         if x.shape[-1] != self.output_size:
             x = F.interpolate(x, size=(self.output_size, self.output_size), 
                               mode='bicubic', align_corners=False, antialias=True)
