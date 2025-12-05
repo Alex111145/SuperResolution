@@ -15,15 +15,16 @@ class CharbonnierLoss(nn.Module):
         return torch.mean(loss)
 
 class CombinedLoss(nn.Module):
-    def __init__(self, l1_w=1.0, perceptual_w=0.05, astro_w=0.05):
+    # INIZIALIZZAZIONE PER LA FASE 1: Perceptual Loss azzerata (0.0), Astro Loss potenziata (0.1)
+    def __init__(self, l1_w=1.0, perceptual_w=0.0, astro_w=0.1): 
         super().__init__()
+        # self.weights è la tupla che viene modificata dinamicamente nello script Modello_supporto.py
         self.weights = (l1_w, perceptual_w, astro_w)
         
         # Loss principale (Ottimizzazione)
         self.char = CharbonnierLoss()
         
         # VGG per Perceptual Loss (Feature Extractor)
-        # Usiamo pesi pre-addestrati e modalità eval
         vgg19 = models.vgg19(weights='DEFAULT').features
         self.vgg = nn.Sequential(*list(vgg19.children())[:18]).eval()
         
@@ -48,7 +49,6 @@ class CombinedLoss(nn.Module):
         astro_loss = torch.mean(torch.sqrt(diff * diff + 1e-6) * weight_map)
         
         # 4. Perceptual Loss (VGG Feature Space)
-        # Clamp necessario per evitare valori fuori range [0,1] che disturbano VGG
         pred_clamped = pred.clamp(0, 1)
         target_clamped = target.clamp(0, 1)
         
@@ -58,7 +58,7 @@ class CombinedLoss(nn.Module):
         
         perc_loss = F.l1_loss(self.vgg(pr), self.vgg(tr))
         
-        # Somma Ponderata
+        # Somma Ponderata (usa i pesi attuali, inizialmente 0.0 per perceptual)
         total_loss = (self.weights[0] * char_loss + 
                       self.weights[1] * perc_loss + 
                       self.weights[2] * astro_loss)
