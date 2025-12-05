@@ -15,57 +15,51 @@ class CharbonnierLoss(nn.Module):
         return torch.mean(loss)
 
 class CombinedLoss(nn.Module):
-    # INIZIALIZZAZIONE PER LA FASE 1: Perceptual Loss azzerata (0.0), Astro Loss potenziata (0.1)
     def __init__(self, l1_w=1.0, perceptual_w=0.0, astro_w=0.1): 
         super().__init__()
-        # self.weights è la tupla che viene modificata dinamicamente nello script Modello_supporto.py
+        # TUPLA DEI PESI MODIFICABILE ESTERNAMENTE
         self.weights = (l1_w, perceptual_w, astro_w)
         
-        # Loss principale (Ottimizzazione)
+        # Loss 1: Ricostruzione (Geometria)
         self.char = CharbonnierLoss()
         
-        # VGG per Perceptual Loss (Feature Extractor)
+        # Loss 2: Perceptual (VGG19)
         vgg19 = models.vgg19(weights='DEFAULT').features
         self.vgg = nn.Sequential(*list(vgg19.children())[:18]).eval()
-        
         for p in self.vgg.parameters(): 
             p.requires_grad = False
             
-        # Normalizzazione ImageNet per VGG (buffers persistenti)
         self.register_buffer('mean', torch.tensor([0.485, 0.456, 0.406]).view(1,3,1,1))
         self.register_buffer('std', torch.tensor([0.229, 0.224, 0.225]).view(1,3,1,1))
 
     def forward(self, pred, target):
-        # 1. Charbonnier Loss
+        # 1. Charbonnier (Loss Principale)
         char_loss = self.char(pred, target)
         
-        # 2. L1 Loss Pura (solo per logging)
-        with torch.no_grad():
-            l1_raw = F.l1_loss(pred, target)
-        
-        # 3. Astro Loss (Pesa di più le parti luminose/stelle)
+        # 2. Astro Loss (Enfasi su stelle/parti chiare)
         diff = torch.abs(pred - target)
+        # Pesa di più le zone dove il target è luminoso (stelle)
         weight_map = 1.0 + 5.0 * target 
         astro_loss = torch.mean(torch.sqrt(diff * diff + 1e-6) * weight_map)
         
-        # 4. Perceptual Loss (VGG Feature Space)
-        pred_clamped = pred.clamp(0, 1)
-        target_clamped = target.clamp(0, 1)
+        # 3. Perceptual Loss (Opzionale, attivata dopo)
+        if self.weights[1] > 0:
+            pred_c = pred.clamp(0, 1).repeat(1,3,1,1)
+            target_c = target.clamp(0, 1).repeat(1,3,1,1)
+            
+            pr = (pred_c - self.mean) / self.std
+            tr = (target_c - self.mean) / self.std
+            perc_loss = F.l1_loss(self.vgg(pr), self.vgg(tr))
+        else:
+            perc_loss = torch.tensor(0.0, device=pred.device)
         
-        # Replica il canale singolo in 3 canali per VGG e normalizza
-        pr = (pred_clamped.repeat(1,3,1,1) - self.mean) / self.std
-        tr = (target_clamped.repeat(1,3,1,1) - self.mean) / self.std
-        
-        perc_loss = F.l1_loss(self.vgg(pr), self.vgg(tr))
-        
-        # Somma Ponderata (usa i pesi attuali, inizialmente 0.0 per perceptual)
+        # CALCOLO TOTALE PONDERATO
         total_loss = (self.weights[0] * char_loss + 
                       self.weights[1] * perc_loss + 
                       self.weights[2] * astro_loss)
         
         return total_loss, {
             'char': char_loss, 
-            'l1_raw': l1_raw,
             'astro': astro_loss, 
             'perceptual': perc_loss
         }
