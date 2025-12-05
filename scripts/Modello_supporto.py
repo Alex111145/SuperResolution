@@ -26,18 +26,19 @@ except ImportError as e:
     print(f"\n❌ ERRORE IMPORT: {e}")
     sys.exit(1)
 
-# ================= HYPERPARAMETERS (NANO CONFIG) =================
-# 📉 BATCH SIZE: Aumentato a 8 perché HAT Nano è molto leggero
+# ================= HYPERPARAMETERS (RRDBNet PURE) =================
+# CNN Pura è più leggera in VRAM rispetto a Transformer (HAT).
+# Possiamo provare Batch 4. Se hai VRAM > 12GB prova anche 6 o 8.
 BATCH_SIZE = 4         
 
-# 📈 ACCUMULATION STEPS: 16
-# Batch Size Effettivo = 8 * 16 = 128
-ACCUM_STEPS = 32       
+# Accumulation Steps più bassi perché il batch reale è decente
+ACCUM_STEPS = 4       
+# Batch Effettivo = 4 * 4 = 16
 
-LR = 2e-4 # LR leggermente più alto per Nano
-TOTAL_EPOCHS = 300
+LR = 2e-4  # Standard per ESRGAN
+TOTAL_EPOCHS = 200 # Aumentato leggermente perché converge più velocemente
 
-LOG_INTERVAL = 5      
+LOG_INTERVAL = 1      
 IMAGE_INTERVAL = 5     
 
 # Gestione warning allocazione memoria
@@ -51,11 +52,14 @@ def train_worker(args):
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats()
+        device = torch.device('cuda:0')
+        print(f"✅ Training su GPU: {torch.cuda.get_device_name(0)}")
+    else:
+        print("❌ ERRORE: Nessuna GPU rilevata.")
+        sys.exit(1)
 
-    device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
-    
-    # --- CORREZIONE NOME ---
-    target_name = f"{args.target}_Worker_HAT_Nano"
+    # Nome target aggiornato
+    target_name = f"{args.target}_Worker_RRDBNet_Pure"
     
     # 2. Setup Cartelle
     out_dir = PROJECT_ROOT / "outputs" / target_name
@@ -86,40 +90,31 @@ def train_worker(args):
     train_ds = AstronomicalDataset(ft_path, base_path=PROJECT_ROOT, augment=True)
     val_ds = AstronomicalDataset(fv_path, base_path=PROJECT_ROOT, augment=False)
     
+    # DataLoader ottimizzato per singola GPU
     train_loader = DataLoader(
         train_ds, 
         batch_size=BATCH_SIZE, 
         shuffle=True, 
         num_workers=4,          
         pin_memory=True, 
-        prefetch_factor=2, 
         persistent_workers=True,
         drop_last=True          
     )
     val_loader = DataLoader(val_ds, batch_size=1, shuffle=False, num_workers=2)
 
-    print(f"🚀 Training Avviato su {device} (HAT-Nano)")
-    print(f"   Config: Batch={BATCH_SIZE} | Accum={ACCUM_STEPS} | Effettivo={BATCH_SIZE*ACCUM_STEPS}")
+    print(f"🚀 Training RRDBNet (ESRGAN) Avviato")
+    print(f"   Config: Batch={BATCH_SIZE} | Accum={ACCUM_STEPS}")
     print(f"   Dataset: {len(train_ds)} train | {len(val_ds)} val")
-    print(f"   Logs: {log_dir}")
 
-    # Inizializzazione Modello (Usa parametri Nano definiti in architecture.py)
-    model = HybridSuperResolutionModel(smoothing='balanced', device=device).to(device)
+    # Inizializzazione Modello (Pure RRDBNet)
+    model = HybridSuperResolutionModel(smoothing='balanced', device='cpu').to(device)
     
     optimizer = optim.AdamW(model.parameters(), lr=LR, weight_decay=1e-4)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=TOTAL_EPOCHS, eta_min=1e-7)
     criterion = CombinedLoss().to(device)
 
     # 4. Configurazione AMP (Mixed Precision)
-    try:
-        from torch.amp import GradScaler, autocast
-        scaler = GradScaler('cuda')
-        use_new_amp = True
-        amp_device = 'cuda'
-    except ImportError:
-        scaler = torch.cuda.amp.GradScaler()
-        use_new_amp = False
-        amp_device = None
+    scaler = torch.amp.GradScaler('cuda')
 
     best_psnr = 0.0
 
@@ -128,13 +123,10 @@ def train_worker(args):
         model.train()
         
         acc_loss_total = 0.0
-        acc_char = 0.0
         acc_astro = 0.0
-        acc_perc = 0.0
         
         optimizer.zero_grad()
         
-        # Barra verde per Nano
         pbar = tqdm(train_loader, desc=f"Ep {epoch}/{TOTAL_EPOCHS}", ncols=120, colour='green') 
         
         for i, batch in enumerate(pbar):
@@ -142,90 +134,62 @@ def train_worker(args):
             hr = batch['hr'].to(device, non_blocking=True)
             
             # --- Forward Pass ---
-            if use_new_amp:
-                with autocast(amp_device):
-                    pred = model(lr)
-                    loss, loss_dict = criterion(pred, hr) 
-                    loss_scaled = loss / ACCUM_STEPS
-            else:
-                with torch.cuda.amp.autocast():
-                    pred = model(lr)
-                    loss, loss_dict = criterion(pred, hr) 
-                    loss_scaled = loss / ACCUM_STEPS
+            with torch.amp.autocast('cuda'):
+                pred = model(lr)
+                loss, loss_dict = criterion(pred, hr) 
+                loss_scaled = loss / ACCUM_STEPS
             
             # --- Backward Pass ---
             scaler.scale(loss_scaled).backward()
             
             acc_loss_total += loss.item()
-            
-            def get_val(d, k):
-                val = d.get(k, 0.0)
-                return val.item() if hasattr(val, 'item') else val
-
-            acc_char += get_val(loss_dict, 'char')
-            acc_astro += get_val(loss_dict, 'astro')
-            acc_perc += get_val(loss_dict, 'perceptual')
+            acc_astro += loss_dict.get('astro', 0).item() if isinstance(loss_dict.get('astro'), torch.Tensor) else 0
 
             # --- Optimizer Step (Accumulato) ---
             if (i + 1) % ACCUM_STEPS == 0:
-                scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5) 
                 scaler.step(optimizer)
                 scaler.update()
                 optimizer.zero_grad()
             
             pbar.set_postfix(loss=f"{loss.item():.4f}")
 
-        # Gestione ultimo batch se non divisibile perfettamente
+        # Gestione ultimo batch
         if (i + 1) % ACCUM_STEPS != 0:
-            scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
             scaler.step(optimizer)
             scaler.update()
             optimizer.zero_grad()
 
         scheduler.step()
         
-        # === LOGGING (Ora attivo ad ogni epoca) ===
+        # === LOGGING ===
         if epoch % LOG_INTERVAL == 0:
-            steps = len(train_loader)
-            current_lr = optimizer.param_groups[0]['lr']
-            
-            # Scrittura Log
-            writer.add_scalar('Train/Loss_Total', acc_loss_total / steps, epoch)
-            writer.add_scalar('Train/Loss_Components/Charbonnier', acc_char / steps, epoch)
-            writer.add_scalar('Train/Loss_Components/Astro', acc_astro / steps, epoch)
-            writer.add_scalar('Train/Loss_Components/Perceptual', acc_perc / steps, epoch)
-            writer.add_scalar('Train/Learning_Rate', current_lr, epoch)
-            
             # Validazione
             model.eval()
             metrics = Metrics()
             
-            with torch.inference_mode():
+            with torch.no_grad():
                 for v_batch in val_loader:
                     v_lr = v_batch['lr'].to(device)
                     v_hr = v_batch['hr'].to(device)
                     
-                    if use_new_amp:
-                        with autocast(amp_device): v_pred = model(v_lr)
-                    else:
-                        with torch.cuda.amp.autocast(): v_pred = model(v_lr)
+                    with torch.amp.autocast('cuda'): 
+                        v_pred = model(v_lr)
                         
                     metrics.update(v_pred.float(), v_hr.float())
             
             res = metrics.compute()
             
+            # Scrittura Log
+            writer.add_scalar('Train/Loss_Total', acc_loss_total / len(train_loader), epoch)
             writer.add_scalar('Val/PSNR', res['psnr'], epoch)
             writer.add_scalar('Val/SSIM', res['ssim'], epoch)
-            writer.flush() # Forza la scrittura su disco
+            writer.add_scalar('Train/LR', optimizer.param_groups[0]['lr'], epoch)
             
             tqdm.write(f"📊 EP {epoch} | PSNR: {res['psnr']:.2f} | SSIM: {res['ssim']:.4f}")
 
             if res['psnr'] > best_psnr:
                 best_psnr = res['psnr']
                 torch.save(model.state_dict(), save_dir / "best_model.pth")
-                tqdm.write("   🏆 Best Model Saved")
             
             torch.save(model.state_dict(), save_dir / "last.pth")
 
