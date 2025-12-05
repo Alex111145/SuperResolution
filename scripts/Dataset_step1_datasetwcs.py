@@ -1,8 +1,11 @@
 import os
 import sys
+import time
 import logging
 from datetime import datetime
 import numpy as np
+import astropy
+import pandas as pd
 from astropy.io import fits
 from astropy.wcs import WCS
 from astropy.wcs.utils import proj_plane_pixel_scales
@@ -11,32 +14,40 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 import warnings
 from pathlib import Path
+from astropy.wcs import WCS, FITSFixedWarning
 import subprocess
 import shutil
 
+# Gestione importazioni opzionali
 try:
     from reproject import reproject_interp
     REPROJECT_AVAILABLE = True
 except ImportError:
     REPROJECT_AVAILABLE = False
-    print("⚠️ Libreria 'reproject' non trovata.")
+    print("Libreria 'reproject' non trovata. La registrazione fallirà.")
 
 warnings.filterwarnings('ignore')
 
+# ================= CONFIGURAZIONE =================
 CURRENT_SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = CURRENT_SCRIPT_DIR.parent
 ROOT_DATA_DIR = PROJECT_ROOT / "data"
 LOG_DIR_ROOT = PROJECT_ROOT / "logs"
 
-FORCE_FOV = 0.46
-USE_MANUAL_FOV = True
+# === IMPOSTAZIONI TELESCOPIO (Salvagente per M33) ===
+# Se ASTAP fallisce, usiamo questo FOV (altezza in gradi).
+FORCE_FOV = 0.46  # focale telescopio osservatorio in gradi
+USE_MANUAL_FOV = True # Metti False se vuoi che ASTAP legga sempre dall'header
+
 NUM_THREADS = 2 
 log_lock = threading.Lock()
+
+# ================= UTILITY & SETUP =================
 
 def setup_logging():
     os.makedirs(LOG_DIR_ROOT, exist_ok=True)
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    log_file = LOG_DIR_ROOT / f'pipeline_{timestamp}.log'
+    log_file = LOG_DIR_ROOT / f'pipeline_smart_FIXED_FOV_{timestamp}.log'
     
     logging.basicConfig(
         level=logging.INFO,
@@ -46,22 +57,41 @@ def setup_logging():
     return logging.getLogger(__name__)
 
 def find_astap_path():
-    possible_paths = [
-        r"C:\Program Files\astap\astap.exe",
-        r"C:\Program Files (x86)\astap\astap.exe",
-        r"D:\astap\astap.exe",
-        r"F:\astap\astap.exe",
-    ]
-    for path in possible_paths:
-        if os.path.isfile(path): return path
+    """
+    Cerca l'eseguibile ASTAP in ordine di priorità:
+    1. PATH di sistema (installazione standard).
+    2. Percorsi standard Linux (/opt, /usr/bin).
+    3. Cartella 'astap' adiacente alla root del progetto.
+    """
+    # 1. Cerca nel PATH globale (se installato con dpkg/apt)
     sys_path = shutil.which("astap")
     if sys_path: return sys_path
+
+    # 2. Percorsi standard Linux
+    linux_paths = [
+        "/usr/bin/astap",
+        "/opt/astap/astap",
+        "/usr/local/bin/astap"
+    ]
+    for path in linux_paths:
+        if os.path.isfile(path): return path
+
+    # 3. Cerca nella cartella genitore (livello di SuperResolution)
+    # Cerca se esiste un binario 'astap' estratto nelle cartelle adiacenti
+    parent_dir = PROJECT_ROOT.parent
+    for item in parent_dir.iterdir():
+        if item.is_dir():
+            # Cerca il binario 'astap' dentro le sottocartelle
+            candidate = item / "astap"
+            if candidate.exists() and os.access(candidate, os.X_OK):
+                return str(candidate)
+            
     return None
 
 def select_target_directory():
-    print("\n" + "🔭"*35)
-    print("PIPELINE REGISTRAZIONE".center(70))
-    print("🔭"*35)
+    print("\n" + "="*35)
+    print("PIPELINE REGISTRAZIONE (LINUX)".center(70))
+    print("="*35)
     try:
         subdirs = [d for d in ROOT_DATA_DIR.iterdir() if d.is_dir() and d.name not in ['splits', 'logs']]
     except: return []
@@ -74,17 +104,20 @@ def select_target_directory():
         return [subdirs[idx]] if 0 <= idx < len(subdirs) else []
     except: return []
 
+# ================= STEP 1: ASTAP SOLVING =================
+
 def run_astap_cmd(cmd, logger):
-    startupinfo = None
-    if sys.platform == 'win32':
-        startupinfo = subprocess.STARTUPINFO()
-        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-    return subprocess.run(cmd, capture_output=True, text=True, startupinfo=startupinfo)
+    """Esegue il comando ASTAP su Linux."""
+    # Su Linux non serve STARTUPINFO per nascondere la finestra in modalità CLI
+    # Assicuriamoci che i path siano stringhe
+    cmd_str = [str(c) for c in cmd]
+    return subprocess.run(cmd_str, capture_output=True, text=True)
 
 def solve_with_astap(inp_file, out_file, astap_exe, logger):
     try:
         shutil.copy2(inp_file, out_file)
         
+        # Check preventivo: WCS già presente?
         try:
             with fits.open(out_file) as hdul:
                 for hdu in hdul:
@@ -94,6 +127,7 @@ def solve_with_astap(inp_file, out_file, astap_exe, logger):
                     except: pass
         except: pass 
         
+        # --- TENTATIVO 1: Solving Veloce (usa header) ---
         cmd_fast = [astap_exe, "-f", str(out_file), "-update", "-r", "30", "-z", "0"]
         res = run_astap_cmd(cmd_fast, logger)
         
@@ -104,10 +138,13 @@ def solve_with_astap(inp_file, out_file, astap_exe, logger):
                     solved = True
                     break
 
+        # --- TENTATIVO 2: Blind Solve (Forza Bruta) ---
         if not solved:
             cmd_blind = [astap_exe, "-f", str(out_file), "-update", "-r", "180", "-z", "0"]
+            
             if USE_MANUAL_FOV:
                 cmd_blind.extend(["-fov", str(FORCE_FOV)])
+                
             res = run_astap_cmd(cmd_blind, logger)
             
             with fits.open(out_file) as hdul:
@@ -123,7 +160,7 @@ def solve_with_astap(inp_file, out_file, astap_exe, logger):
             return True
         else:
             with log_lock: 
-                logger.warning(f"❌ FALLITO {inp_file.name}")
+                logger.warning(f"FALLITO {inp_file.name}")
             return False
 
     except Exception as e:
@@ -137,7 +174,7 @@ def process_step1_folder(inp_dir, out_dir, astap_exe, logger):
     files = sorted(list(set(files)))
     if not files: return 0
 
-    print(f"   Solving {inp_dir.name} ({len(files)} img)...")
+    print(f"Solving {inp_dir.name} ({len(files)} img)...")
     success = 0
     with ThreadPoolExecutor(max_workers=NUM_THREADS) as executor:
         futures = []
@@ -147,6 +184,8 @@ def process_step1_folder(inp_dir, out_dir, astap_exe, logger):
         for f in tqdm(as_completed(futures), total=len(files), desc="   ASTAP"):
             if f.result(): success += 1
     return success
+
+# ================= STEP 2: REGISTRAZIONE =================
 
 def get_best_hdu(hdul):
     for hdu in hdul:
@@ -160,6 +199,7 @@ def extract_wcs_info(f, logger=None):
             w = WCS(hdu.header)
             if not w.has_celestial: return None
             
+            # Calcolo Scala Robusto
             scales = proj_plane_pixel_scales(w)
             if scales is not None and len(scales) >= 1:
                 scale_arcsec = scales[0] * 3600
@@ -183,6 +223,7 @@ def register_single_image_smart(info, ref_wcs, out_dir, logger):
             wcs_orig = WCS(header)
             
             if data.ndim == 3: data = data[0]
+            # Pulizia bad pixels
             data = np.where(data < -10000, np.nan, data)
 
         native_scale_deg = info['scale'] / 3600.0
@@ -209,6 +250,7 @@ def main_registration(h_in, o_in, h_out, o_out, logger):
     h_files = list(h_in.glob('*_solved.fits'))
     o_files = list(o_in.glob('*_solved.fits'))
     
+    # Estrazione Info
     print("   Lettura WCS headers...")
     h_infos = [x for x in [extract_wcs_info(f, logger) for f in h_files] if x]
     o_infos = [x for x in [extract_wcs_info(f, logger) for f in o_files] if x]
@@ -231,19 +273,30 @@ def main_registration(h_in, o_in, h_out, o_out, logger):
             
     return success > 0
 
+# ================= MAIN =================
+
 def main():
     logger = setup_logging()
+    
+    # Check presenza ASTAP
     ASTAP_PATH = find_astap_path()
     
     if not ASTAP_PATH:
-        print("❌ ERRORE: ASTAP non trovato!")
+        print("\n" + "!"*50)
+        print("ERRORE CRITICO: ASTAP non trovato!")
+        print(f"Hai menzionato un file .deb. Ricorda di installarlo con:")
+        print(f"   sudo dpkg -i /percorso/del/tuo/astap_amd64.deb")
+        print(f"   sudo apt-get install -f  (se mancano dipendenze)")
+        print("!"*50 + "\n")
         return
+    else:
+        print(f"ASTAP trovato in: {ASTAP_PATH}")
     
     targets = select_target_directory()
     if not targets: return
 
     for BASE_DIR in targets:
-        print(f"\n🚀 ELABORAZIONE: {BASE_DIR.name}")
+        print(f"\n ELABORAZIONE: {BASE_DIR.name}")
         
         in_o = BASE_DIR / '1_originarie/local_raw'
         in_h = BASE_DIR / '1_originarie/img_lights'
@@ -259,14 +312,14 @@ def main():
         s2 = process_step1_folder(in_h, out_solved_h, ASTAP_PATH, logger)
         
         if s1+s2 == 0:
-            print("   ❌ Nessun file risolto.")
+            print("Nessun file risolto. Controlla il FOV in ASTAP o i cataloghi stellari.")
             continue
 
         print("   [2/2] Registrazione e Riproiezione...")
         if main_registration(out_solved_h, out_solved_o, out_reg_h, out_reg_o, logger):
-            print("   ✅ Pipeline Completata.")
+            print("Pipeline Completata.")
         else:
-            print("   ❌ Errore Registrazione.")
+            print("Errore Registrazione.")
 
 if __name__ == "__main__":
     main()
