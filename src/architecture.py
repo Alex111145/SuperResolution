@@ -3,8 +3,14 @@ import torch.nn as nn
 import torch.nn.functional as F
 from .env_setup import import_external_archs
 
+# ==========================================================
+# 1. RECUPERO ARCHITETTURE ESTERNE
+# ==========================================================
 RRDBNet, HAT_Arch = import_external_archs()
 
+# ==========================================================
+# 2. UTILITY LAYERS
+# ==========================================================
 class AntiCheckerboardLayer(nn.Module):
     def __init__(self, mode='balanced'):
         super().__init__()
@@ -20,35 +26,54 @@ class AntiCheckerboardLayer(nn.Module):
             bk = [[1,2,1],[2,4,2],[1,2,1]]
 
         kernel = torch.tensor(bk, dtype=torch.float32) / s
-        self.conv = nn.Conv2d(1, 1, k, padding=p, bias=False)
-        with torch.no_grad(): self.conv.weight[0, 0] = kernel
-        self.conv.weight.requires_grad = False
+        kernel = kernel.unsqueeze(0).unsqueeze(0)
+        self.register_buffer('weight', kernel)
+        self.padding = p
 
-    def forward(self, x): return self.conv(x)
+    def forward(self, x):
+        return F.conv2d(x, self.weight.expand(x.shape[1], -1, -1, -1), 
+                        padding=self.padding, groups=x.shape[1])
 
+# ==========================================================
+# 3. MODELLO IBRIDO (Light Stage 1 + HAT Nano)
+# ==========================================================
 class HybridSuperResolutionModel(nn.Module):
-    def __init__(self, output_size=512, smoothing='balanced', device='cuda'):
+    def __init__(self, output_size=512, smoothing='balanced', device='cpu'):
         super().__init__()
         self.output_size = output_size
         
-        if RRDBNet is None: 
-            raise ImportError("BasicSR mancante.")
+        if RRDBNet is None:
+            raise ImportError("❌ ERRORE: BasicSR (RRDBNet) non trovato.")
         
-        self.stage1 = RRDBNet(num_in_ch=1, num_out_ch=1, num_feat=64, num_block=23, num_grow_ch=32, scale=2)
+        # -------------------------
+        # STAGE 1: RRDBNet (VERSIONE LIGHT - VRAM SAVE)
+        # -------------------------
+        self.stage1 = RRDBNet(
+            num_in_ch=1, 
+            num_out_ch=1, 
+            num_feat=48,      # Ridotto da 64 per risparmiare VRAM
+            num_block=12,     # Ridotto da 23
+            num_grow_ch=24,   
+            scale=2
+        )
         
         self.has_stage2 = False
         self.stage2 = nn.Identity()
         
+        # -------------------------
+        # STAGE 2: HAT (Nano Config)
+        # -------------------------
         if HAT_Arch:
             try:
                 self.stage2 = HAT_Arch(
                     img_size=64, 
                     patch_size=1, 
                     in_chans=1, 
-                    embed_dim=120,
-                    depths=[6, 6, 6, 6, 6, 6], 
-                    num_heads=[6, 6, 6, 6, 6, 6], 
-                    window_size=16,          
+                    # --- PARAMETRI NANO/TINY ---
+                    embed_dim=36,             # Molto basso (Nano standard è 48)
+                    depths=[2, 2, 2, 2],      # Poca profondità
+                    num_heads=[4, 4, 4, 4],   
+                    window_size=8,            
                     compress_ratio=3, 
                     squeeze_factor=30, 
                     conv_scale=0.01, 
@@ -61,9 +86,9 @@ class HybridSuperResolutionModel(nn.Module):
                     resi_connection='1conv'
                 )
                 self.has_stage2 = True
-                print("   ✅ HAT: Light-120 (Memory Safe)")
-            except Exception as e: 
-                print(f"⚠️ HAT Error: {e}. Solo Stage 1.")
+                print("   🧠 Modello HAT inizializzato (Configurazione NANO).")
+            except Exception as e:
+                print(f"   ⚠️ Errore init HAT: {e}. Uso solo Stage 1.")
 
         if smoothing != 'none':
             self.s1 = AntiCheckerboardLayer(smoothing)
@@ -71,12 +96,11 @@ class HybridSuperResolutionModel(nn.Module):
             self.sf = AntiCheckerboardLayer('light')
         else:
             self.s1 = self.s2 = self.sf = nn.Identity()
-            
-        self.to(device)
 
     def forward(self, x):
         x = self.stage1(x)
         x = self.s1(x)
+        
         if self.has_stage2: 
             x = self.stage2(x)
             x = self.s2(x)
