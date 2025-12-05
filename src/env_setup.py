@@ -34,24 +34,32 @@ def import_external_archs():
     
     RRDBNet = None
     HAT = None
+    SwinIR = None
     
-    # 1. Import BasicSR
+    # 1. Import BasicSR (RRDBNet)
     try:
         from basicsr.archs.rrdbnet_arch import RRDBNet
-        print("   ✅ BasicSR (RRDBNet) importato correttamente.")
+        print("   ✅ RRDBNet importato.")
     except ImportError as e:
-        print(f"   ❌ Errore import BasicSR: {e}")
+        print(f"   ❌ Errore RRDBNet: {e}")
 
     # 2. Import HAT
     try:
         from hat.archs.hat_arch import HAT
-        print("   ✅ HAT importato correttamente.")
-    except ImportError as e:
-        # Fallback per struttura cartelle diversa
+        print("   ✅ HAT importato.")
+    except ImportError:
         try:
             from archs.hat_arch import HAT
-            print("   ✅ HAT importato (path alternativo).")
-        except ImportError as e2:
-            print(f"   ❌ Errore import HAT: {e}")
+            print("   ✅ HAT importato (path alt).")
+        except ImportError:
+            pass # Ignoriamo se manca HAT, stiamo usando SwinIR
 
-    return RRDBNet, HAT
+    # 3. Import SwinIR (NUOVO)
+    try:
+        from basicsr.archs.swinir_arch import SwinIR
+        print("   ✅ SwinIR importato.")
+    except ImportError as e:
+        print(f"   ❌ Errore SwinIR: {e}")
+        print("      Assicurati di aver installato: pip install basicsr")
+
+    return RRDBNet, HAT, SwinIR
