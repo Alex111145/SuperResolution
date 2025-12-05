@@ -26,31 +26,29 @@ except ImportError as e:
     print(f"\n❌ ERRORE IMPORT: {e}")
     sys.exit(1)
 
-# ================= HYPERPARAMETERS SWINIR (OPTIMAL) =================
-# BATCH_SIZE (reale) = 6
+# ================= HYPERPARAMETERS OTTIMIZZATI =================
 BATCH_SIZE = 6         
-
-# ACCUMULAZIONE: Effective Batch Size = 6 * 12 = 72
-ACCUM_STEPS = 12  
-
-# LEARNING RATE: Accelerato
-LR = 5e-5  
+ACCUM_STEPS = 12       # Batch Size Effettiva = 72
+LR = 2e-4              # Learning Rate più aggressivo per sbloccare il training
 TOTAL_EPOCHS = 300 
 
-# >>> PARAMETRI PER IL CAMBIO DINAMICO DELLA LOSS <<<
-SWITCH_EPOCH = 51            # Epoca in cui attivare la Perceptual Loss (50 + 1)
-PERCEPTUAL_W_FINAL = 0.05    # Peso finale della Perceptual Loss
+# >>> SCHEDULE DELLE LOSS (2 FASI) <<<
+# Fase 1 (0-30): Solo L1 Loss per imparare la geometria e intensità base
+# Fase 2 (30+): Attivazione Astro e Perceptual per i dettagli
+EPOCH_ENABLE_ADVANCED_LOSS = 30
 
 LOG_INTERVAL = 1      
 IMAGE_INTERVAL = 5     
 
-# Ottimizzazione Memoria
+# Ottimizzazioni Memoria
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 torch.backends.cudnn.benchmark = True
 torch.backends.cuda.matmul.allow_tf32 = True 
 
 def train_worker(args):
-    # 1. Setup Device
+    # Check ambiente
+    print(f"🔧 Python Executable: {sys.executable}")
+    
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
         device = torch.device('cuda:0')
@@ -59,10 +57,7 @@ def train_worker(args):
         print("❌ ERRORE: Nessuna GPU rilevata.")
         sys.exit(1)
 
-    # NOME CARTELLA SPECIFICO PER SWINIR MEDIUM
-    target_name = f"{args.target}_Worker_SwinIR_Medium" 
-    
-    # 2. Setup Cartelle
+    target_name = f"{args.target}_SwinIR_GlobalNorm" 
     out_dir = PROJECT_ROOT / "outputs" / target_name
     save_dir = out_dir / "checkpoints"
     img_dir = out_dir / "images"
@@ -73,18 +68,18 @@ def train_worker(args):
 
     writer = SummaryWriter(str(log_dir))
 
-    # 3. Caricamento Dataset
+    # Caricamento Dataset JSON
     splits_dir = PROJECT_ROOT / "data" / args.target / "8_dataset_split" / "splits_json"
     if not splits_dir.exists():
-        sys.exit(f"❌ Splits non trovati in: {splits_dir}")
+        sys.exit(f"❌ Splits non trovati in: {splits_dir}\n   Esegui Modello_2.py!")
     
     try:
         with open(splits_dir / "train.json") as f: train_data = json.load(f)
         with open(splits_dir / "val.json") as f: val_data = json.load(f)
-    except FileNotFoundError:
-        sys.exit("❌ File JSON non trovati. Esegui Modello_2.py")
+    except:
+        sys.exit("❌ Errore lettura JSON.")
 
-    # File temp per compatibilità loader
+    # Creazione file temp per il DataLoader
     ft_path = splits_dir / f"temp_train_{os.getpid()}.json"
     fv_path = splits_dir / f"temp_val_{os.getpid()}.json"
     with open(ft_path, 'w') as f: json.dump(train_data, f)
@@ -93,56 +88,41 @@ def train_worker(args):
     train_ds = AstronomicalDataset(ft_path, base_path=PROJECT_ROOT, augment=True)
     val_ds = AstronomicalDataset(fv_path, base_path=PROJECT_ROOT, augment=False)
     
-    train_loader = DataLoader(
-        train_ds, 
-        batch_size=BATCH_SIZE, 
-        shuffle=True, 
-        num_workers=4,          
-        pin_memory=True, 
-        persistent_workers=True,
-        drop_last=True          
-    )
+    train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True, 
+                              num_workers=4, pin_memory=True, drop_last=True)
     val_loader = DataLoader(val_ds, batch_size=1, shuffle=False, num_workers=2)
 
-    print(f"🚀 Training SwinIR Avviato")
-    print(f"   Config: Batch={BATCH_SIZE} | Accum={ACCUM_STEPS} (Effective=72) | Epochs={TOTAL_EPOCHS}")
-    print(f"   Dataset: {len(train_ds)} train | {len(val_ds)} val")
+    print(f"🚀 Avvio Training: {len(train_ds)} coppie")
+    print(f"   Config: LR={LR} | Switch Loss @ Epoca {EPOCH_ENABLE_ADVANCED_LOSS}")
 
-    # 4. Inizializzazione Modello
+    # Modello
     model = HybridSuperResolutionModel(device=device).to(device)
     
-    # Inizializza Loss (usa i pesi iniziali 1.0, 0.0, 0.1 da losses.py)
-    criterion = CombinedLoss().to(device) 
+    # Loss Iniziale: SOLO Charbonnier (L1)
+    # Pesi: (Charbonnier, Perceptual, Astro)
+    criterion = CombinedLoss(l1_w=1.0, perceptual_w=0.0, astro_w=0.0).to(device)
+    # Forza i pesi iniziali per sicurezza
+    criterion.weights = (1.0, 0.0, 0.0) 
     
-    # Optimizer AdamW (Raccomandato per SwinIR)
     optimizer = optim.AdamW(model.parameters(), lr=LR, betas=(0.9, 0.999), weight_decay=1e-2)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=TOTAL_EPOCHS, eta_min=1e-7)
 
     scaler = torch.amp.GradScaler('cuda')
     best_psnr = 0.0
 
-    # === TRAINING LOOP ===
     for epoch in range(1, TOTAL_EPOCHS + 1):
         
-        # --- LOGICA DI SWITCH LOSS (DINAMICA) ---
-        if epoch == SWITCH_EPOCH and criterion.weights[1] < PERCEPTUAL_W_FINAL:
-            # Modifica la tupla interna dei pesi: (l1_w, perceptual_w, astro_w)
-            # Prende il peso char e astro correnti e imposta il perceptual_w_final
-            new_weights = (criterion.weights[0], PERCEPTUAL_W_FINAL, criterion.weights[2])
-            criterion.weights = new_weights
-            tqdm.write(f"\n💡 EPOCH {epoch}: ATTIVAZIONE PERCEPTUAL LOSS (w={PERCEPTUAL_W_FINAL}).")
-            tqdm.write(f"   (Losses attive: Char={criterion.weights[0]}, Perc={criterion.weights[1]}, Astro={criterion.weights[2]})")
-        # ----------------------------------------
-        
+        # --- ATTIVAZIONE LOSS AVANZATE ---
+        if epoch == EPOCH_ENABLE_ADVANCED_LOSS:
+            # Attiva Perceptual (0.05) e Astro (0.1)
+            criterion.weights = (1.0, 0.05, 0.1)
+            tqdm.write(f"\n💡 EPOCH {epoch}: ATTIVAZIONE Perceptual & Astro Loss!")
+
         model.train()
-        
-        acc_loss_total = 0.0
-        acc_char = 0.0
-        acc_astro = 0.0
-        acc_perc = 0.0
+        acc_loss = 0.0
         
         optimizer.zero_grad()
-        pbar = tqdm(train_loader, desc=f"Ep {epoch}/{TOTAL_EPOCHS} [SwinIR]", ncols=120, colour='cyan') 
+        pbar = tqdm(train_loader, desc=f"Ep {epoch}/{TOTAL_EPOCHS}", ncols=110, colour='green') 
         
         for i, batch in enumerate(pbar):
             lr_img = batch['lr'].to(device, non_blocking=True)
@@ -150,56 +130,38 @@ def train_worker(args):
             
             with torch.amp.autocast('cuda'):
                 pred = model(lr_img)
-                loss, loss_dict = criterion(pred, hr_img) 
+                loss, _ = criterion(pred, hr_img) 
                 loss_scaled = loss / ACCUM_STEPS
             
             scaler.scale(loss_scaled).backward()
+            acc_loss += loss.item()
             
-            # Accumulo delle loss componenti (per logging completo)
-            acc_loss_total += loss.item()
-            acc_char += loss_dict.get('char', torch.tensor(0.0)).item()
-            acc_astro += loss_dict.get('astro', torch.tensor(0.0)).item()
-            acc_perc += loss_dict.get('perceptual', torch.tensor(0.0)).item()
-            
-            # Step accumulato
             if (i + 1) % ACCUM_STEPS == 0:
-                # Gradient Clipping: FONDAMENTALE per SwinIR
                 scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
-                
                 scaler.step(optimizer)
                 scaler.update()
                 optimizer.zero_grad()
             
             pbar.set_postfix(loss=f"{loss.item():.4f}")
 
-        # Gestione ultimo batch
+        # Gestione ultimo batch residuo
         if (i + 1) % ACCUM_STEPS != 0:
-            if (i + 1) > 0:
-                scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
-                scaler.step(optimizer)
-                scaler.update()
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
+            scaler.step(optimizer)
+            scaler.update()
             optimizer.zero_grad()
 
         scheduler.step()
         
-        # === LOGGING COMPLETO ===
+        # Validazione
         if epoch % LOG_INTERVAL == 0:
-            avg_loss = acc_loss_total / len(train_loader)
+            writer.add_scalar('Train/Loss', acc_loss/len(train_loader), epoch)
+            writer.add_scalar('Train/LR', optimizer.param_groups[0]['lr'], epoch)
             
-            writer.add_scalar('Train/Loss_Total', avg_loss, epoch)
-            writer.add_scalar('Train/Learning_Rate', optimizer.param_groups[0]['lr'], epoch)
-            
-            # Grafici componenti della loss
-            writer.add_scalar('Train/Loss_Components/Charbonnier', acc_char / len(train_loader), epoch)
-            writer.add_scalar('Train/Loss_Components/Astro', acc_astro / len(train_loader), epoch)
-            writer.add_scalar('Train/Loss_Components/Perceptual', acc_perc / len(train_loader), epoch)
-            
-            # Validazione (PSNR/SSIM)
             model.eval()
             metrics = Metrics()
-            
             with torch.no_grad():
                 for v_batch in val_loader:
                     v_lr = v_batch['lr'].to(device)
@@ -209,11 +171,10 @@ def train_worker(args):
                     metrics.update(v_pred.float(), v_hr.float())
             
             res = metrics.compute()
-            
             writer.add_scalar('Val/PSNR', res['psnr'], epoch)
             writer.add_scalar('Val/SSIM', res['ssim'], epoch)
             
-            tqdm.write(f"📊 EP {epoch} | PSNR: {res['psnr']:.2f} dB | SSIM: {res['ssim']:.4f}")
+            tqdm.write(f"📊 Val | PSNR: {res['psnr']:.2f} | SSIM: {res['ssim']:.4f}")
 
             if res['psnr'] > best_psnr:
                 best_psnr = res['psnr']
@@ -221,22 +182,21 @@ def train_worker(args):
             
             torch.save(model.state_dict(), save_dir / "last.pth")
 
-            # Preview Immagini
             if epoch % IMAGE_INTERVAL == 0:
-                v_lr_up = torch.nn.functional.interpolate(v_lr, size=(512,512), mode='nearest').cpu()
+                # Upscale bicubico per confronto visivo
+                v_lr_up = torch.nn.functional.interpolate(v_lr, size=(512,512), mode='bicubic')
                 comp = torch.cat((v_lr_up, v_pred.cpu(), v_hr.cpu()), dim=3).clamp(0,1)
-                writer.add_image('Visual_Check', comp[0], epoch)
                 vutils.save_image(comp, img_dir / f"epoch_{epoch}.png")
             
             writer.flush()
 
     try:
-        if ft_path.exists(): ft_path.unlink()
-        if fv_path.exists(): fv_path.unlink()
+        os.remove(ft_path)
+        os.remove(fv_path)
     except: pass
     
     writer.close()
-    print(f"\n✅ Training SwinIR Completato. Modello in: {out_dir}")
+    print(f"\n✅ Training Completato: {out_dir}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -246,6 +206,4 @@ if __name__ == "__main__":
         train_worker(args)
     except Exception as e:
         print(f"\n❌ ERRORE WORKER: {e}")
-        import traceback
-        traceback.print_exc()
         sys.exit(1)

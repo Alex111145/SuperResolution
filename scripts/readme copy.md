@@ -2,8 +2,11 @@
 2) source venv/bin/activate
 3) pip install -r requirements.txt
 4) nvtop (per capire che gpu viene usata)
-5) pip install tensorboard
+5) pip install tensorboard o pip install --upgrade --force-reinstall tensorboard
 6)tensorboard --logdir=outputs --port=6006 --bind_all
+
+
+nvtop
 
 PROBLEMI NON FUNZIONA LA DATASET_1
 NOTA: SE FAI ANDARE SU WINDOWS MI DA ERRORE COMUNQUE RISOLVI IO FACCIO ALTRO 
