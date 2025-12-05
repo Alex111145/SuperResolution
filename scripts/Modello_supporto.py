@@ -184,7 +184,10 @@ def train_worker(args):
 
             if epoch % IMAGE_INTERVAL == 0:
                 # Upscale bicubico per confronto visivo
-                v_lr_up = torch.nn.functional.interpolate(v_lr, size=(512,512), mode='bicubic')
+                # FIX: Aggiunto .cpu() per spostare v_lr_up dalla GPU alla RAM
+                v_lr_up = torch.nn.functional.interpolate(v_lr, size=(512,512), mode='bicubic').cpu()
+                
+                # Ora tutti e tre i tensori sono su CPU
                 comp = torch.cat((v_lr_up, v_pred.cpu(), v_hr.cpu()), dim=3).clamp(0,1)
                 vutils.save_image(comp, img_dir / f"epoch_{epoch}.png")
             

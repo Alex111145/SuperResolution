@@ -36,7 +36,8 @@ LOG_DIR_ROOT = PROJECT_ROOT / "logs"
 
 # === IMPOSTAZIONI TELESCOPIO (Salvagente per M33) ===
 # Se ASTAP fallisce, usiamo questo FOV (altezza in gradi).
-FORCE_FOV = 0.46  # focale telescopio osservatorio in gradi
+# Calcolo per M1 (Focale 2670mm, Sensore ~21mm altezza) -> ~0.46 gradi
+FORCE_FOV = 0.46  #focale telescopio osservatorio in gradi
 USE_MANUAL_FOV = True # Metti False se vuoi che ASTAP legga sempre dall'header
 
 NUM_THREADS = 2 
@@ -58,39 +59,46 @@ def setup_logging():
 
 def find_astap_path():
     """
-    Cerca l'eseguibile ASTAP in ordine di priorità:
-    1. PATH di sistema (installazione standard).
-    2. Percorsi standard Linux (/opt, /usr/bin).
-    3. Cartella 'astap' adiacente alla root del progetto.
+    Trova l'eseguibile di ASTAP in modo Cross-Platform (Windows/Linux)
     """
-    # 1. Cerca nel PATH globale (se installato con dpkg/apt)
+    possible_paths = []
+
+    # 1. Definizione percorsi in base all'OS
+    if sys.platform == 'win32':
+        possible_paths = [
+            r"C:\Program Files\astap\astap.exe",
+            r"C:\Program Files (x86)\astap\astap.exe",
+            r"D:\astap\astap.exe",
+            r"F:\astap\astap.exe",
+            r"C:\ProgramData\Microsoft\Windows\Start Menu\Programs\ASTAP\astap.exe"
+        ]
+    else:
+        # Percorsi standard Linux/Mac
+        possible_paths = [
+            "/opt/astap/astap",
+            "/usr/bin/astap",
+            "/usr/local/bin/astap"
+        ]
+
+    # 2. Controllo esistenza fisica
+    for path in possible_paths:
+        if os.path.isfile(path):
+            # Su Linux verifichiamo anche i permessi di esecuzione
+            if sys.platform != 'win32':
+                if os.access(path, os.X_OK):
+                    return path
+            else:
+                return path
+
+    # 3. Fallback sul PATH di sistema
     sys_path = shutil.which("astap")
     if sys_path: return sys_path
-
-    # 2. Percorsi standard Linux
-    linux_paths = [
-        "/usr/bin/astap",
-        "/opt/astap/astap",
-        "/usr/local/bin/astap"
-    ]
-    for path in linux_paths:
-        if os.path.isfile(path): return path
-
-    # 3. Cerca nella cartella genitore (livello di SuperResolution)
-    # Cerca se esiste un binario 'astap' estratto nelle cartelle adiacenti
-    parent_dir = PROJECT_ROOT.parent
-    for item in parent_dir.iterdir():
-        if item.is_dir():
-            # Cerca il binario 'astap' dentro le sottocartelle
-            candidate = item / "astap"
-            if candidate.exists() and os.access(candidate, os.X_OK):
-                return str(candidate)
-            
+    
     return None
 
 def select_target_directory():
     print("\n" + "="*35)
-    print("PIPELINE REGISTRAZIONE (LINUX)".center(70))
+    print("PIPELINE REGISTRAZIONE (FORCED FOV)".center(70))
     print("="*35)
     try:
         subdirs = [d for d in ROOT_DATA_DIR.iterdir() if d.is_dir() and d.name not in ['splits', 'logs']]
@@ -107,11 +115,22 @@ def select_target_directory():
 # ================= STEP 1: ASTAP SOLVING =================
 
 def run_astap_cmd(cmd, logger):
-    """Esegue il comando ASTAP su Linux."""
-    # Su Linux non serve STARTUPINFO per nascondere la finestra in modalità CLI
-    # Assicuriamoci che i path siano stringhe
-    cmd_str = [str(c) for c in cmd]
-    return subprocess.run(cmd_str, capture_output=True, text=True)
+    """
+    Esegue il comando ASTAP gestendo le differenze tra Windows (startupinfo) e Linux.
+    """
+    startupinfo = None
+    
+    # startupinfo esiste solo su Windows
+    if sys.platform == 'win32':
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, startupinfo=startupinfo)
+    except Exception as e:
+        logger.error(f"Errore esecuzione comando ASTAP: {e}")
+        # Ritorna un oggetto dummy in caso di errore critico del subprocess
+        return subprocess.CompletedProcess(args=cmd, returncode=1, stdout="", stderr=str(e))
 
 def solve_with_astap(inp_file, out_file, astap_exe, logger):
     try:
@@ -128,6 +147,7 @@ def solve_with_astap(inp_file, out_file, astap_exe, logger):
         except: pass 
         
         # --- TENTATIVO 1: Solving Veloce (usa header) ---
+        # Se l'header ha coordinate, prova in raggio 30 gradi
         cmd_fast = [astap_exe, "-f", str(out_file), "-update", "-r", "30", "-z", "0"]
         res = run_astap_cmd(cmd_fast, logger)
         
@@ -140,9 +160,12 @@ def solve_with_astap(inp_file, out_file, astap_exe, logger):
 
         # --- TENTATIVO 2: Blind Solve (Forza Bruta) ---
         if not solved:
+            # Qui usiamo il FOV forzato se abilitato. 
+            # Questo salva la situazione se l'header manca di Focale/PixelSize
             cmd_blind = [astap_exe, "-f", str(out_file), "-update", "-r", "180", "-z", "0"]
             
             if USE_MANUAL_FOV:
+                # Aggiungiamo -fov <gradi> per dire ad ASTAP la scala esatta
                 cmd_blind.extend(["-fov", str(FORCE_FOV)])
                 
             res = run_astap_cmd(cmd_blind, logger)
@@ -161,6 +184,8 @@ def solve_with_astap(inp_file, out_file, astap_exe, logger):
         else:
             with log_lock: 
                 logger.warning(f"FALLITO {inp_file.name}")
+                # Logghiamo output ASTAP solo se fallisce per debug
+                # logger.warning(f"   ASTAP out: {res.stdout[:200]}...") 
             return False
 
     except Exception as e:
@@ -277,20 +302,13 @@ def main_registration(h_in, o_in, h_out, o_out, logger):
 
 def main():
     logger = setup_logging()
-    
-    # Check presenza ASTAP
     ASTAP_PATH = find_astap_path()
     
     if not ASTAP_PATH:
-        print("\n" + "!"*50)
         print("ERRORE CRITICO: ASTAP non trovato!")
-        print(f"Hai menzionato un file .deb. Ricorda di installarlo con:")
-        print(f"   sudo dpkg -i /percorso/del/tuo/astap_amd64.deb")
-        print(f"   sudo apt-get install -f  (se mancano dipendenze)")
-        print("!"*50 + "\n")
+        if sys.platform != 'win32':
+            print("SU LINUX: Assicurati che ASTAP sia installato in /opt/astap o /usr/bin")
         return
-    else:
-        print(f"ASTAP trovato in: {ASTAP_PATH}")
     
     targets = select_target_directory()
     if not targets: return
@@ -312,7 +330,7 @@ def main():
         s2 = process_step1_folder(in_h, out_solved_h, ASTAP_PATH, logger)
         
         if s1+s2 == 0:
-            print("Nessun file risolto. Controlla il FOV in ASTAP o i cataloghi stellari.")
+            print("Nessun file risolto. Controlla il FOV in ASTAP.")
             continue
 
         print("   [2/2] Registrazione e Riproiezione...")
