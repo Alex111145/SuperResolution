@@ -3,83 +3,45 @@ import torch.nn as nn
 import torch.nn.functional as F
 from .env_setup import import_external_archs
 
-# ==========================================================
-# 1. RECUPERO ARCHITETTURE ESTERNE
-# ==========================================================
-# Importiamo solo RRDBNet, ignoriamo HAT
-RRDBNet, _ = import_external_archs()
+# Importiamo SwinIR (terzo valore restituito)
+_, _, SwinIR_Arch = import_external_archs()
 
-# ==========================================================
-# 2. UTILITY LAYERS
-# ==========================================================
-class AntiCheckerboardLayer(nn.Module):
-    def __init__(self, mode='balanced'):
-        super().__init__()
-        if mode == 'strong':
-            k, p, s = 7, 3, 1600.0
-            bk = [[1,6,15,20,15,6,1],[6,36,90,120,90,36,6],[15,90,225,300,225,90,15],
-                  [20,120,300,400,300,120,20],[15,90,225,300,225,90,15],[6,36,90,120,90,36,6],[1,6,15,20,15,6,1]]
-        elif mode == 'balanced':
-            k, p, s = 5, 2, 256.0
-            bk = [[1,4,6,4,1],[4,16,24,16,4],[6,24,36,24,6],[4,16,24,16,4],[1,4,6,4,1]]
-        else:
-            k, p, s = 3, 1, 16.0
-            bk = [[1,2,1],[2,4,2],[1,2,1]]
-
-        kernel = torch.tensor(bk, dtype=torch.float32) / s
-        kernel = kernel.unsqueeze(0).unsqueeze(0)
-        self.register_buffer('weight', kernel)
-        self.padding = p
-
-    def forward(self, x):
-        return F.conv2d(x, self.weight.expand(x.shape[1], -1, -1, -1), 
-                        padding=self.padding, groups=x.shape[1])
-
-# ==========================================================
-# 3. MODELLO PURO RRDBNet (ESRGAN Style)
-# ==========================================================
 class HybridSuperResolutionModel(nn.Module):
     def __init__(self, output_size=512, smoothing='balanced', device='cpu'):
         super().__init__()
         self.output_size = output_size
         
-        if RRDBNet is None:
-            raise ImportError("❌ ERRORE: BasicSR (RRDBNet) non trovato.")
+        if SwinIR_Arch is None:
+            raise ImportError("❌ ERRORE CRITICO: SwinIR non trovato in BasicSR.")
         
-        print("🏗️  Model Arch: Pure RRDBNet (ESRGAN Style) x4")
+        print("🏗️  Model Arch: SwinIR-Light (Vision Transformer) x4")
         
-        # -------------------------
-        # STAGE 1: RRDBNet (Full 4x Upscale)
-        # -------------------------
-        # Configuriamo per 4x diretto (128 -> 512)
-        # num_block=23 è lo standard ESRGAN (Qualità Alta)
-        # Se hai ancora problemi di memoria, scendi a num_block=16
-        self.stage1 = RRDBNet(
-            num_in_ch=1, 
-            num_out_ch=1, 
-            num_feat=64,      # Standard ESRGAN
-            num_block=23,     # Standard ESRGAN
-            num_grow_ch=32,   
-            scale=4           # <--- FONDAMENTALE: Fa tutto l'upscale qui
+        # CONFIGURAZIONE SWINIR LIGHTWEIGHT
+        # Questa è la configurazione ufficiale "lightweight" per SR
+        # Parametri ridotti rispetto al modello standard per girare su GPU singola
+        self.model = SwinIR_Arch(
+            upscale=4,             # Upscaling diretto 4x (128->512)
+            in_chans=1,            # 1 canale (Bianco e Nero)
+            img_size=128,          # Dimensione patch input (training)
+            window_size=8,
+            img_range=1.,
+            
+            # Configurazione "Light":
+            depths=[6, 6, 6, 6],   # Profondità ridotta
+            embed_dim=60,          # Embedding ridotto
+            num_heads=[6, 6, 6, 6],
+            
+            mlp_ratio=2,
+            upsampler='pixelshuffle', # PixelShuffle è standard per SwinIR
+            resi_connection='1conv'
         )
-        
-        # Disabilitiamo Stage 2 (HAT)
-        self.has_stage2 = False
-        self.stage2 = nn.Identity()
-
-        # Anti-Checkerboard opzionale
-        if smoothing != 'none':
-            self.sf = AntiCheckerboardLayer('light')
-        else:
-            self.sf = nn.Identity()
 
     def forward(self, x):
-        # Stage 1 fa tutto il lavoro (128px -> 512px)
-        x = self.stage1(x)
+        # SwinIR gestisce tutto internamente
+        x = self.model(x)
         
-        # Resize di sicurezza (solo se output size diverso da 512)
+        # Resize di sicurezza se l'output non fosse esattamente 512
         if x.shape[-1] != self.output_size:
             x = F.interpolate(x, size=(self.output_size, self.output_size), 
                               mode='bicubic', align_corners=False, antialias=True)
-            
-        return self.sf(x)
+        return x
