@@ -29,37 +29,18 @@ def setup_paths():
 setup_paths()
 
 def import_external_archs():
-    """Tenta di importare le architetture e stampa errori specifici se fallisce."""
+    """Tenta di importare le architetture e restituisce SwinIR."""
     print("🔧 Importazione Moduli Esterni...")
     
-    RRDBNet = None
-    HAT = None
     SwinIR = None
     
-    # 1. Import BasicSR (RRDBNet)
-    try:
-        from basicsr.archs.rrdbnet_arch import RRDBNet
-        print("   ✅ RRDBNet importato.")
-    except ImportError as e:
-        print(f"   ❌ Errore RRDBNet: {e}")
-
-    # 2. Import HAT
-    try:
-        from hat.archs.hat_arch import HAT
-        print("   ✅ HAT importato.")
-    except ImportError:
-        try:
-            from archs.hat_arch import HAT
-            print("   ✅ HAT importato (path alt).")
-        except ImportError:
-            pass # Ignoriamo se manca HAT, stiamo usando SwinIR
-
-    # 3. Import SwinIR (NUOVO)
+    # Tentativo importazione SwinIR da BasicSR
     try:
         from basicsr.archs.swinir_arch import SwinIR
-        print("   ✅ SwinIR importato.")
+        print("   ✅ SwinIR importato correttamente.")
     except ImportError as e:
-        print(f"   ❌ Errore SwinIR: {e}")
+        print(f"   ❌ Errore import SwinIR: {e}")
         print("      Assicurati di aver installato: pip install basicsr")
 
-    return RRDBNet, HAT, SwinIR
+    # Restituiamo None per RRDBNet/HAT perché non li usiamo più
+    return None, None, SwinIR
