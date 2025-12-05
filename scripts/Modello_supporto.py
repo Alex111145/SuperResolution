@@ -26,16 +26,23 @@ except ImportError as e:
     print(f"\n❌ ERRORE IMPORT: {e}")
     sys.exit(1)
 
-# ================= HYPERPARAMETERS SWINIR =================
-# Valori aggiornati in base alle tue specifiche (Batch=6, Accum=12)
+# ================= HYPERPARAMETERS SWINIR (OPTIMAL) =================
+# BATCH_SIZE (reale) = 6
 BATCH_SIZE = 6         
+
+# ACCUMULAZIONE: Effective Batch Size = 6 * 12 = 72
 ACCUM_STEPS = 12  
 
-LR = 2e-4  
+# LEARNING RATE: Accelerato
+LR = 5e-5  
 TOTAL_EPOCHS = 300 
 
-LOG_INTERVAL = 2      
-IMAGE_INTERVAL = 10     
+# >>> PARAMETRI PER IL CAMBIO DINAMICO DELLA LOSS <<<
+SWITCH_EPOCH = 51            # Epoca in cui attivare la Perceptual Loss (50 + 1)
+PERCEPTUAL_W_FINAL = 0.05    # Peso finale della Perceptual Loss
+
+LOG_INTERVAL = 1      
+IMAGE_INTERVAL = 5     
 
 # Ottimizzazione Memoria
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
@@ -52,8 +59,8 @@ def train_worker(args):
         print("❌ ERRORE: Nessuna GPU rilevata.")
         sys.exit(1)
 
-    # NOME CARTELLA SPECIFICO PER SWINIR
-    target_name = f"{args.target}_Worker_SwinIR_Medium"
+    # NOME CARTELLA SPECIFICO PER SWINIR MEDIUM
+    target_name = f"{args.target}_Worker_SwinIR_Medium" 
     
     # 2. Setup Cartelle
     out_dir = PROJECT_ROOT / "outputs" / target_name
@@ -98,25 +105,37 @@ def train_worker(args):
     val_loader = DataLoader(val_ds, batch_size=1, shuffle=False, num_workers=2)
 
     print(f"🚀 Training SwinIR Avviato")
-    print(f"   Config: Batch={BATCH_SIZE} | Accum={ACCUM_STEPS} (Effective={BATCH_SIZE*ACCUM_STEPS}) | Epochs={TOTAL_EPOCHS}")
+    print(f"   Config: Batch={BATCH_SIZE} | Accum={ACCUM_STEPS} (Effective=72) | Epochs={TOTAL_EPOCHS}")
     print(f"   Dataset: {len(train_ds)} train | {len(val_ds)} val")
 
     # 4. Inizializzazione Modello
     model = HybridSuperResolutionModel(device=device).to(device)
     
+    # Inizializza Loss (usa i pesi iniziali 1.0, 0.0, 0.1 da losses.py)
+    criterion = CombinedLoss().to(device) 
+    
     # Optimizer AdamW (Raccomandato per SwinIR)
     optimizer = optim.AdamW(model.parameters(), lr=LR, betas=(0.9, 0.999), weight_decay=1e-2)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=TOTAL_EPOCHS, eta_min=1e-7)
-    criterion = CombinedLoss().to(device)
 
     scaler = torch.amp.GradScaler('cuda')
     best_psnr = 0.0
 
     # === TRAINING LOOP ===
     for epoch in range(1, TOTAL_EPOCHS + 1):
+        
+        # --- LOGICA DI SWITCH LOSS (DINAMICA) ---
+        if epoch == SWITCH_EPOCH and criterion.weights[1] < PERCEPTUAL_W_FINAL:
+            # Modifica la tupla interna dei pesi: (l1_w, perceptual_w, astro_w)
+            # Prende il peso char e astro correnti e imposta il perceptual_w_final
+            new_weights = (criterion.weights[0], PERCEPTUAL_W_FINAL, criterion.weights[2])
+            criterion.weights = new_weights
+            tqdm.write(f"\n💡 EPOCH {epoch}: ATTIVAZIONE PERCEPTUAL LOSS (w={PERCEPTUAL_W_FINAL}).")
+            tqdm.write(f"   (Losses attive: Char={criterion.weights[0]}, Perc={criterion.weights[1]}, Astro={criterion.weights[2]})")
+        # ----------------------------------------
+        
         model.train()
         
-        # >>> INIZIALIZZAZIONE NUOVE VARIABILI PER LOG COMPLETO <<<
         acc_loss_total = 0.0
         acc_char = 0.0
         acc_astro = 0.0
@@ -131,12 +150,12 @@ def train_worker(args):
             
             with torch.amp.autocast('cuda'):
                 pred = model(lr_img)
-                loss, loss_dict = criterion(pred, hr_img) # Otteniamo il dizionario delle loss
+                loss, loss_dict = criterion(pred, hr_img) 
                 loss_scaled = loss / ACCUM_STEPS
             
             scaler.scale(loss_scaled).backward()
             
-            # >>> ACCUMULO DELLE LOSS COMPONENTI <<<
+            # Accumulo delle loss componenti (per logging completo)
             acc_loss_total += loss.item()
             acc_char += loss_dict.get('char', torch.tensor(0.0)).item()
             acc_astro += loss_dict.get('astro', torch.tensor(0.0)).item()
@@ -167,13 +186,12 @@ def train_worker(args):
         
         # === LOGGING COMPLETO ===
         if epoch % LOG_INTERVAL == 0:
-            # Calcoliamo la media delle loss accumulate
             avg_loss = acc_loss_total / len(train_loader)
             
             writer.add_scalar('Train/Loss_Total', avg_loss, epoch)
             writer.add_scalar('Train/Learning_Rate', optimizer.param_groups[0]['lr'], epoch)
             
-            # >>> NUOVI GRAFICI AGGIUNTI <<<
+            # Grafici componenti della loss
             writer.add_scalar('Train/Loss_Components/Charbonnier', acc_char / len(train_loader), epoch)
             writer.add_scalar('Train/Loss_Components/Astro', acc_astro / len(train_loader), epoch)
             writer.add_scalar('Train/Loss_Components/Perceptual', acc_perc / len(train_loader), epoch)
