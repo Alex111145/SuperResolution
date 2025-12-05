@@ -27,19 +27,17 @@ except ImportError as e:
     sys.exit(1)
 
 # ================= HYPERPARAMETERS SWINIR =================
-# SwinIR consuma più VRAM. Batch 4 è sicuro per ~8GB VRAM.
-# Se hai 12GB+ puoi provare BATCH_SIZE = 6 o 8.
-BATCH_SIZE = 4         
-ACCUM_STEPS = 4  # Batch virtuale effettivo = 16
+# Valori aggiornati in base alle tue specifiche (Batch=6, Accum=12)
+BATCH_SIZE = 6         
+ACCUM_STEPS = 12  
 
-# Learning Rate standard per SwinIR
 LR = 2e-4  
-TOTAL_EPOCHS = 300 # I Transformer richiedono più tempo per convergere
+TOTAL_EPOCHS = 300 
 
-LOG_INTERVAL = 1      
-IMAGE_INTERVAL = 5     
+LOG_INTERVAL = 2      
+IMAGE_INTERVAL = 10     
 
-# Gestione memoria PyTorch per evitare frammentazione
+# Ottimizzazione Memoria
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 torch.backends.cudnn.benchmark = True
 torch.backends.cuda.matmul.allow_tf32 = True 
@@ -54,10 +52,10 @@ def train_worker(args):
         print("❌ ERRORE: Nessuna GPU rilevata.")
         sys.exit(1)
 
-    # NOME CARTELLA OUTPUT AGGIORNATO
-    target_name = f"{args.target}_Worker_SwinIR_Light"
+    # NOME CARTELLA SPECIFICO PER SWINIR
+    target_name = f"{args.target}_Worker_SwinIR_Medium"
     
-    # 2. Setup Cartelle Output
+    # 2. Setup Cartelle
     out_dir = PROJECT_ROOT / "outputs" / target_name
     save_dir = out_dir / "checkpoints"
     img_dir = out_dir / "images"
@@ -73,13 +71,13 @@ def train_worker(args):
     if not splits_dir.exists():
         sys.exit(f"❌ Splits non trovati in: {splits_dir}")
     
-    # Gestione file JSON temporanei per il loader
     try:
         with open(splits_dir / "train.json") as f: train_data = json.load(f)
         with open(splits_dir / "val.json") as f: val_data = json.load(f)
     except FileNotFoundError:
-        sys.exit("❌ File JSON train/val non trovati. Esegui Modello_2.py")
+        sys.exit("❌ File JSON non trovati. Esegui Modello_2.py")
 
+    # File temp per compatibilità loader
     ft_path = splits_dir / f"temp_train_{os.getpid()}.json"
     fv_path = splits_dir / f"temp_val_{os.getpid()}.json"
     with open(ft_path, 'w') as f: json.dump(train_data, f)
@@ -100,13 +98,13 @@ def train_worker(args):
     val_loader = DataLoader(val_ds, batch_size=1, shuffle=False, num_workers=2)
 
     print(f"🚀 Training SwinIR Avviato")
-    print(f"   Config: Batch={BATCH_SIZE} | Accum={ACCUM_STEPS} | Epochs={TOTAL_EPOCHS}")
+    print(f"   Config: Batch={BATCH_SIZE} | Accum={ACCUM_STEPS} (Effective={BATCH_SIZE*ACCUM_STEPS}) | Epochs={TOTAL_EPOCHS}")
     print(f"   Dataset: {len(train_ds)} train | {len(val_ds)} val")
 
-    # 4. Inizializzazione Modello & Ottimizzatore
+    # 4. Inizializzazione Modello
     model = HybridSuperResolutionModel(device=device).to(device)
     
-    # AdamW è raccomandato per Transformer
+    # Optimizer AdamW (Raccomandato per SwinIR)
     optimizer = optim.AdamW(model.parameters(), lr=LR, betas=(0.9, 0.999), weight_decay=1e-2)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=TOTAL_EPOCHS, eta_min=1e-7)
     criterion = CombinedLoss().to(device)
@@ -117,7 +115,12 @@ def train_worker(args):
     # === TRAINING LOOP ===
     for epoch in range(1, TOTAL_EPOCHS + 1):
         model.train()
-        acc_loss = 0.0
+        
+        # >>> INIZIALIZZAZIONE NUOVE VARIABILI PER LOG COMPLETO <<<
+        acc_loss_total = 0.0
+        acc_char = 0.0
+        acc_astro = 0.0
+        acc_perc = 0.0
         
         optimizer.zero_grad()
         pbar = tqdm(train_loader, desc=f"Ep {epoch}/{TOTAL_EPOCHS} [SwinIR]", ncols=120, colour='cyan') 
@@ -128,13 +131,20 @@ def train_worker(args):
             
             with torch.amp.autocast('cuda'):
                 pred = model(lr_img)
-                loss, _ = criterion(pred, hr_img) 
+                loss, loss_dict = criterion(pred, hr_img) # Otteniamo il dizionario delle loss
                 loss_scaled = loss / ACCUM_STEPS
             
             scaler.scale(loss_scaled).backward()
             
+            # >>> ACCUMULO DELLE LOSS COMPONENTI <<<
+            acc_loss_total += loss.item()
+            acc_char += loss_dict.get('char', torch.tensor(0.0)).item()
+            acc_astro += loss_dict.get('astro', torch.tensor(0.0)).item()
+            acc_perc += loss_dict.get('perceptual', torch.tensor(0.0)).item()
+            
+            # Step accumulato
             if (i + 1) % ACCUM_STEPS == 0:
-                # Gradient Clipping: CRUCIALE PER LA STABILITÀ DI SWINIR
+                # Gradient Clipping: FONDAMENTALE per SwinIR
                 scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
                 
@@ -142,19 +152,33 @@ def train_worker(args):
                 scaler.update()
                 optimizer.zero_grad()
             
-            acc_loss += loss.item()
             pbar.set_postfix(loss=f"{loss.item():.4f}")
 
-        # Step finale se batch non divisibile
+        # Gestione ultimo batch
         if (i + 1) % ACCUM_STEPS != 0:
-            scaler.step(optimizer)
-            scaler.update()
+            if (i + 1) > 0:
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
+                scaler.step(optimizer)
+                scaler.update()
             optimizer.zero_grad()
 
         scheduler.step()
         
-        # === VALIDATION & LOGGING ===
+        # === LOGGING COMPLETO ===
         if epoch % LOG_INTERVAL == 0:
+            # Calcoliamo la media delle loss accumulate
+            avg_loss = acc_loss_total / len(train_loader)
+            
+            writer.add_scalar('Train/Loss_Total', avg_loss, epoch)
+            writer.add_scalar('Train/Learning_Rate', optimizer.param_groups[0]['lr'], epoch)
+            
+            # >>> NUOVI GRAFICI AGGIUNTI <<<
+            writer.add_scalar('Train/Loss_Components/Charbonnier', acc_char / len(train_loader), epoch)
+            writer.add_scalar('Train/Loss_Components/Astro', acc_astro / len(train_loader), epoch)
+            writer.add_scalar('Train/Loss_Components/Perceptual', acc_perc / len(train_loader), epoch)
+            
+            # Validazione (PSNR/SSIM)
             model.eval()
             metrics = Metrics()
             
@@ -168,10 +192,8 @@ def train_worker(args):
             
             res = metrics.compute()
             
-            writer.add_scalar('Train/Loss', acc_loss / len(train_loader), epoch)
             writer.add_scalar('Val/PSNR', res['psnr'], epoch)
             writer.add_scalar('Val/SSIM', res['ssim'], epoch)
-            writer.add_scalar('Train/LR', optimizer.param_groups[0]['lr'], epoch)
             
             tqdm.write(f"📊 EP {epoch} | PSNR: {res['psnr']:.2f} dB | SSIM: {res['ssim']:.4f}")
 
