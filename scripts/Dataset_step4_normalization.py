@@ -21,15 +21,15 @@ ROOT_DATA_DIR = PROJECT_ROOT / "data"
 USE_LOG_STRETCH = True 
 
 # AUMENTA QUESTO VALORE PER NERI PIÙ PROFONDI
-# 1.0 = Standard (conservativo)
-# 10.0 = Nero deciso
-# 20.0 = Nero molto profondo (elimina tutto il rumore, rischia di mangiare nebulosità deboli)
-BLACK_CLIP_PERCENTILE = 5.0  
+# 3.0 = Bilanciato (Consigliato)
+# 5.0 = Nero deciso
+# 15.0 = Molto aggressivo
+BLACK_CLIP_PERCENTILE = 59.0  
 
 NUM_SAMPLES_PER_IMG = 4000
 BATCH_SIZE = 32
 NUM_WORKERS = 4
-DEBUG_INTERVAL = 50 
+DEBUG_INTERVAL = 10 
 
 # ================= DATASET PYTORCH =================
 class RawFitsDataset(Dataset):
@@ -104,10 +104,10 @@ def save_debug_png(hr_raw, lr_raw, hr_norm, lr_norm, save_path):
     
     # NORMALIZED
     axes[1,0].imshow(hr_norm, cmap='gray', vmin=0, vmax=65535)
-    axes[1,0].set_title("Hubble AI Input (DEEP BLACK)", color='white')
+    axes[1,0].set_title(f"Hubble AI Input (Clip {BLACK_CLIP_PERCENTILE}%)", color='white')
     
     axes[1,1].imshow(lr_norm, cmap='gray', vmin=0, vmax=65535)
-    axes[1,1].set_title("Obs AI Input (DEEP BLACK)", color='white')
+    axes[1,1].set_title(f"Obs AI Input (Clip {BLACK_CLIP_PERCENTILE}%)", color='white')
     
     for ax in axes.flat: ax.axis('off')
     plt.tight_layout()
@@ -190,8 +190,13 @@ def main():
             print(f"Errore {pair_path.name}: {e}")
 
     print("\n✅ Completato.")
-    print(f"   Controlla '7_dataset_debug_png'. Se è TROPPO scuro (perdi dettagli),")
-    print(f"   abbassa BLACK_CLIP_PERCENTILE nello script (es. da {BLACK_CLIP_PERCENTILE} a 5.0).")
+    
+    # --- MODIFICA RICHIESTA: ZIP automatico con nome variabile ---
+    zip_name = target_dir / f"debug_checks_clip_{BLACK_CLIP_PERCENTILE}"
+    print(f"   🗜️  Zippando cartella debug in: {zip_name}.zip")
+    shutil.make_archive(str(zip_name), 'zip', str(debug_dir))
+    
+    print(f"   Controlla il file ZIP creato per verificare se il nero al {BLACK_CLIP_PERCENTILE}% va bene.")
 
 if __name__ == "__main__":
     main()
