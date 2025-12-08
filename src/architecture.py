@@ -71,8 +71,8 @@ class HybridSuperResolutionModel(nn.Module):
                     in_chans=1, 
                     # --- PARAMETRI NANO/TINY ---
                     embed_dim=36,             # Molto basso (Nano standard è 48)
-                    depths=[2, 2, 2, 2],      # Poca profondità
-                    num_heads=[4, 4, 4, 4],   
+                    depths=[4, 4, 4, 4],      # Poca profondità
+                    num_heads=[6, 6, 6, 6],   # Pochi heads   
                     window_size=8,            
                     compress_ratio=3, 
                     squeeze_factor=30, 
