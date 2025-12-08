@@ -4,6 +4,7 @@ import argparse
 import sys
 import json
 import torch
+import torch.nn as nn
 import torch.optim as optim
 import torchvision.utils as vutils
 from torch.utils.data import DataLoader
@@ -26,24 +27,23 @@ except ImportError as e:
     print(f"\n❌ ERRORE IMPORT: {e}")
     sys.exit(1)
 
-# ================= HYPERPARAMETERS (NANO CONFIG) =================
-# 📉 BATCH SIZE: Aumentato a 8 perché HAT Nano è molto leggero
-BATCH_SIZE = 4         
+# ================= HYPERPARAMETERS =================
+# BATCH SIZE: 4 Totali. 
+# Su 2 GPU = 2 immagini per GPU (Molto sicuro).
+BATCH_SIZE = 4        
 
-# 📈 ACCUMULATION STEPS: 16
-# Batch Size Effettivo = 8 * 16 = 128
-ACCUM_STEPS = 32       
-
-LR = 2e-4 # LR leggermente più alto per Nano
+ACCUM_STEPS = 32      
+LR = 2e-4
 TOTAL_EPOCHS = 300
 
 LOG_INTERVAL = 5      
-IMAGE_INTERVAL = 5     
+IMAGE_INTERVAL = 5    
 
-# Gestione warning allocazione memoria
+# --- FIX STABILITÀ CUDA ---
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
-
-torch.backends.cudnn.benchmark = True
+# Disabilitiamo benchmark per evitare algoritmi conv che usano memoria out-of-bounds
+torch.backends.cudnn.benchmark = False 
+torch.backends.cudnn.deterministic = True
 torch.backends.cuda.matmul.allow_tf32 = True 
 
 def train_worker(args):
@@ -54,8 +54,7 @@ def train_worker(args):
 
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
     
-    # --- CORREZIONE NOME ---
-    target_name = f"{args.target}_Worker_HAT_Nano"
+    target_name = f"{args.target}_Worker_HAT_Medium"
     
     # 2. Setup Cartelle
     out_dir = PROJECT_ROOT / "outputs" / target_name
@@ -98,19 +97,25 @@ def train_worker(args):
     )
     val_loader = DataLoader(val_ds, batch_size=1, shuffle=False, num_workers=2)
 
-    print(f"🚀 Training Avviato su {device} (HAT-Nano)")
-    print(f"   Config: Batch={BATCH_SIZE} | Accum={ACCUM_STEPS} | Effettivo={BATCH_SIZE*ACCUM_STEPS}")
-    print(f"   Dataset: {len(train_ds)} train | {len(val_ds)} val")
-    print(f"   Logs: {log_dir}")
-
-    # Inizializzazione Modello (Usa parametri Nano definiti in architecture.py)
+    print(f"🚀 Training Avviato su {device} (HAT-Medium)")
+    print(f"   Config: Batch={BATCH_SIZE} | Accum={ACCUM_STEPS}")
+    
+    # Inizializzazione Modello
     model = HybridSuperResolutionModel(smoothing='balanced', device=device).to(device)
+    
+    # --- MULTI-GPU SETUP ---
+    num_gpus = torch.cuda.device_count()
+    if num_gpus > 1:
+        print(f"   🔥 MULTI-GPU ATTIVO: {num_gpus} GPU in uso.")
+        model = nn.DataParallel(model)
+    else:
+        print(f"   ⚠️ Single GPU Mode")
     
     optimizer = optim.AdamW(model.parameters(), lr=LR, weight_decay=1e-4)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=TOTAL_EPOCHS, eta_min=1e-7)
     criterion = CombinedLoss().to(device)
 
-    # 4. Configurazione AMP (Mixed Precision)
+    # 4. Configurazione AMP
     try:
         from torch.amp import GradScaler, autocast
         scaler = GradScaler('cuda')
@@ -134,12 +139,12 @@ def train_worker(args):
         
         optimizer.zero_grad()
         
-        # Barra verde per Nano
-        pbar = tqdm(train_loader, desc=f"Ep {epoch}/{TOTAL_EPOCHS}", ncols=120, colour='green') 
+        pbar = tqdm(train_loader, desc=f"Ep {epoch}/{TOTAL_EPOCHS}", ncols=120, colour='cyan') 
         
         for i, batch in enumerate(pbar):
-            lr = batch['lr'].to(device, non_blocking=True)
-            hr = batch['hr'].to(device, non_blocking=True)
+            # FIX: .contiguous() previene errori di memoria con DataParallel scatter
+            lr = batch['lr'].to(device, non_blocking=True).contiguous()
+            hr = batch['hr'].to(device, non_blocking=True).contiguous()
             
             # --- Forward Pass ---
             if use_new_amp:
@@ -166,7 +171,7 @@ def train_worker(args):
             acc_astro += get_val(loss_dict, 'astro')
             acc_perc += get_val(loss_dict, 'perceptual')
 
-            # --- Optimizer Step (Accumulato) ---
+            # --- Optimizer Step ---
             if (i + 1) % ACCUM_STEPS == 0:
                 scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5) 
@@ -176,7 +181,7 @@ def train_worker(args):
             
             pbar.set_postfix(loss=f"{loss.item():.4f}")
 
-        # Gestione ultimo batch se non divisibile perfettamente
+        # Gestione ultimo batch
         if (i + 1) % ACCUM_STEPS != 0:
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
@@ -186,26 +191,24 @@ def train_worker(args):
 
         scheduler.step()
         
-        # === LOGGING (Ora attivo ad ogni epoca) ===
+        # === LOGGING ===
         if epoch % LOG_INTERVAL == 0:
             steps = len(train_loader)
             current_lr = optimizer.param_groups[0]['lr']
             
-            # Scrittura Log
             writer.add_scalar('Train/Loss_Total', acc_loss_total / steps, epoch)
             writer.add_scalar('Train/Loss_Components/Charbonnier', acc_char / steps, epoch)
             writer.add_scalar('Train/Loss_Components/Astro', acc_astro / steps, epoch)
             writer.add_scalar('Train/Loss_Components/Perceptual', acc_perc / steps, epoch)
             writer.add_scalar('Train/Learning_Rate', current_lr, epoch)
             
-            # Validazione
             model.eval()
             metrics = Metrics()
             
             with torch.inference_mode():
                 for v_batch in val_loader:
-                    v_lr = v_batch['lr'].to(device)
-                    v_hr = v_batch['hr'].to(device)
+                    v_lr = v_batch['lr'].to(device).contiguous()
+                    v_hr = v_batch['hr'].to(device).contiguous()
                     
                     if use_new_amp:
                         with autocast(amp_device): v_pred = model(v_lr)
@@ -215,26 +218,32 @@ def train_worker(args):
                     metrics.update(v_pred.float(), v_hr.float())
             
             res = metrics.compute()
-            
             writer.add_scalar('Val/PSNR', res['psnr'], epoch)
             writer.add_scalar('Val/SSIM', res['ssim'], epoch)
-            writer.flush() # Forza la scrittura su disco
+            writer.flush()
             
             tqdm.write(f"📊 EP {epoch} | PSNR: {res['psnr']:.2f} | SSIM: {res['ssim']:.4f}")
 
             if res['psnr'] > best_psnr:
                 best_psnr = res['psnr']
-                torch.save(model.state_dict(), save_dir / "best_model.pth")
+                if isinstance(model, nn.DataParallel):
+                    state_dict = model.module.state_dict()
+                else:
+                    state_dict = model.state_dict()
+                torch.save(state_dict, save_dir / "best_model.pth")
                 tqdm.write("   🏆 Best Model Saved")
             
-            torch.save(model.state_dict(), save_dir / "last.pth")
+            if isinstance(model, nn.DataParallel):
+                state_last = model.module.state_dict()
+            else:
+                state_last = model.state_dict()
+            torch.save(state_last, save_dir / "last.pth")
 
-            # Salvataggio Immagini
+            # Preview
             if epoch % IMAGE_INTERVAL == 0:
                 v_lr_up = torch.nn.functional.interpolate(v_lr, size=(512,512), mode='nearest').cpu()
                 v_pred_cpu = v_pred.detach().cpu()
                 v_hr_cpu = v_hr.cpu()
-                
                 comp = torch.cat((v_lr_up, v_pred_cpu, v_hr_cpu), dim=3).clamp(0,1)
                 writer.add_image('Preview', comp[0], epoch)
                 vutils.save_image(comp, img_dir / f"epoch_{epoch}.png")
