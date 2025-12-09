@@ -10,7 +10,7 @@ ROOT_DATA_DIR = PROJECT_ROOT / "data"
 def prepare_sanity_dataset(target_dir_path):
     """
     Prepara il dataset ESCLUSIVAMENTE per il Sanity Check (Overfitting).
-    Prende solo la prima immagine e la duplica per Train/Val/Test.
+    Chiede all'utente quale patch specifica usare e la duplica per Train/Val/Test.
     """
     target_dir = Path(target_dir_path)
     print(f"\n🧪 PREPARAZIONE DATASET SANITY CHECK: {target_dir.name}")
@@ -20,27 +20,44 @@ def prepare_sanity_dataset(target_dir_path):
     if not SOURCE.exists():
         SOURCE = target_dir / "7_dataset_ready"
 
-    # --- MODIFICA: Cartella dedicata per evitare conflitti con il training vero ---
+    # --- Cartella dedicata per evitare conflitti con il training vero ---
     SPLITS = target_dir / "8_sanity_split" / "splits_json"
     
     if not SOURCE.exists():
         print(f"❌ Nessuna directory dati sorgente trovata in {target_dir.name}.")
         return
 
+    # Trova tutte le cartelle pair e le ordina
     pair_folders = sorted([d for d in SOURCE.glob("pair_*") if d.is_dir()])
+    num_patches = len(pair_folders)
     
     if not pair_folders:
         print(f"❌ Nessuna coppia trovata in {SOURCE.name}.")
         return
 
-    # --- MODIFICA RADICALE PER SANITY CHECK ---
-    selected_pair = pair_folders[0] 
+    # --- MODIFICA: Selezione Manuale della Patch ---
+    print(f"📁 Trovate {num_patches} patch disponibili (da {pair_folders[0].name} a {pair_folders[-1].name}).")
     
+    selected_pair = None
+    while True:
+        try:
+            user_input = input(f"👉 Inserisci il numero della patch da usare (1 - {num_patches}): ").strip()
+            choice_idx = int(user_input) - 1 # Convertiamo in indice base-0
+            
+            if 0 <= choice_idx < num_patches:
+                selected_pair = pair_folders[choice_idx]
+                break
+            else:
+                print(f"❌ Numero non valido. Devi inserire un numero tra 1 e {num_patches}.")
+        except ValueError:
+            print("❌ Input non valido. Inserisci un numero intero.")
+
+    # Verifica esistenza file nella patch selezionata
     h_file = selected_pair / "hubble.tiff"
     o_file = selected_pair / "observatory.tiff"
     
     if not (h_file.exists() and o_file.exists()):
-        print(f"❌ La coppia ({selected_pair.name}) è incompleta.")
+        print(f"❌ La coppia selezionata ({selected_pair.name}) è incompleta (manca hubble.tiff o observatory.tiff).")
         return
 
     single_entry = [{
@@ -49,8 +66,9 @@ def prepare_sanity_dataset(target_dir_path):
         "ground_path": str(o_file.resolve())
     }]
 
-    print(f"   ⚠️ MODE: SANITY CHECK (OVERFITTING)")
-    print(f"   🎯 Immagine Singola: **{selected_pair.name}**")
+    print(f"\n ⚠️  MODE: SANITY CHECK (OVERFITTING)")
+    print(f" 🎯 Immagine Selezionata: **{selected_pair.name}**")
+    print(f" 🔄 Questa immagine verrà usata per Train, Val e Test.")
 
     SPLITS.mkdir(parents=True, exist_ok=True)
     

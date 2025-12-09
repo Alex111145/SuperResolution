@@ -30,7 +30,7 @@ except ImportError as e:
 BATCH_SIZE = 4        
 ACCUM_STEPS = 1       
 LR = 5e-4             
-TOTAL_EPOCHS = 3000
+TOTAL_EPOCHS = 1000
 
 LOG_INTERVAL = 5     
 IMAGE_INTERVAL = 20  

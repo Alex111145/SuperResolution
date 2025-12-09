@@ -1,6 +1,7 @@
 import subprocess
 import sys
 import os
+import torch
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -39,25 +40,60 @@ def select_target():
             if 0 <= idx < len(targets): return targets[idx]
         except: pass
 
+def select_single_gpu():
+    """
+    Rileva le GPU ma obbliga l'utente a selezionarne UNA sola.
+    """
+    print(f"\n{Colors.HEADER}🖥️  SELEZIONE GPU (Max 1 per Sanity Check){Colors.ENDC}")
+    
+    if not torch.cuda.is_available():
+        print(f"{Colors.FAIL}❌ Nessuna GPU rilevata. Uscita.{Colors.ENDC}")
+        sys.exit(1)
+        
+    count = torch.cuda.device_count()
+    print(f"   Rilevate {count} GPU disponibili:")
+    
+    for i in range(count):
+        name = torch.cuda.get_device_name(i)
+        print(f"   {Colors.CYAN}[{i}]{Colors.ENDC} {name}")
+        
+    print(f"\n   ⚠️  Il Sanity Check richiede l'uso di una singola scheda.")
+
+    while True:
+        selection = input(f"\n{Colors.BOLD}Quale GPU usare? (Inserisci un solo numero, es. 0) > {Colors.ENDC}").strip()
+        
+        # Controllo che sia un numero singolo
+        if selection.isdigit():
+            idx = int(selection)
+            if 0 <= idx < count:
+                print(f"   ✅ Selezionata GPU {idx}: {torch.cuda.get_device_name(idx)}")
+                return str(idx)
+            else:
+                print(f"{Colors.FAIL}⚠️ Indice {idx} non esistente.{Colors.ENDC}")
+        else:
+            print(f"{Colors.FAIL}⚠️ Input non valido. Inserisci un solo numero intero.{Colors.ENDC}")
+
 def main():
     clear_screen()
-    print(f"{Colors.HEADER}{Colors.BOLD}🚀 SANITY CHECK LAUNCHER (Overfitting Mode){Colors.ENDC}")
-    print(f"{Colors.HEADER}==========================================={Colors.ENDC}")
+    print(f"{Colors.HEADER}{Colors.BOLD}🚀 SANITY CHECK LAUNCHER (Single GPU){Colors.ENDC}")
+    print(f"{Colors.HEADER}====================================={Colors.ENDC}")
 
     target_name = select_target()
-    gpu_str = input(f"\n{Colors.BOLD}GPU IDs [es. 0,1]: {Colors.ENDC}").strip() or "0,1"
     
-    # --- PUNTA AL WORKER SPECIFICO PER SANITY ---
+    # Selezione singola GPU
+    gpu_str = select_single_gpu()
+    
     worker_script = HERE / "SanityCheck_Worker.py"
     
     env = os.environ.copy()
     env["PYTHONPATH"] = f"{PROJECT_ROOT}:{env.get('PYTHONPATH', '')}"
     env["CUDA_VISIBLE_DEVICES"] = gpu_str
+    # Ottimizzazione memoria anche per singola GPU
     env["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
     cmd = [sys.executable, str(worker_script), "--target", target_name]
 
-    print(f"\n{Colors.CYAN}⚡ Avvio Sanity Worker...{Colors.ENDC}\n")
+    print(f"\n{Colors.CYAN}⚡ Avvio Sanity Worker su GPU {gpu_str}...{Colors.ENDC}\n")
     try:
         subprocess.Popen(cmd, env=env).wait()
     except KeyboardInterrupt:
