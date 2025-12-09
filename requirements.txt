@@ -1,0 +1,36 @@
+# --- Index per PyTorch con CUDA ---
+--extra-index-url https://download.pytorch.org/whl/cu118
+
+# --- Core & Data Science ---
+numpy<2.0
+pandas
+scipy
+matplotlib
+pyyaml
+future
+
+# --- Image Processing ---
+scikit-image
+opencv-python
+Pillow
+
+# --- Astronomy Specific ---
+astropy
+reproject
+astroalign
+
+# --- Deep Learning (PyTorch & Tools) ---
+torch>=2.0.0
+torchvision
+torchaudio
+tensorboard
+einops
+timm
+# >>> NUOVO: Necessario per SwinIR
+basicsr>=1.4.2 
+
+# --- Utilities & Data Management ---
+tqdm
+lmdb
+addict
+yapf
