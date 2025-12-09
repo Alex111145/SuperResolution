@@ -15,7 +15,7 @@ class SanityStarLoss(nn.Module):
         # Se il pixel target è luminoso (stella), l'errore pesa 500 volte di più
         # Questa logica è specifica per forzare l'overfitting sulle stelle nel Sanity Check
         stars_mask = target > 0.02  
-        weight_map[stars_mask] = 500.0 
+        weight_map[stars_mask] = 100.0 
         
         loss = torch.mean(diff * weight_map)
         

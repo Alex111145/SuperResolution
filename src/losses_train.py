@@ -14,7 +14,7 @@ class TrainStarLoss(nn.Module):
         # ma riduciamo leggermente l'estremismo rispetto al sanity check
         # per permettere al modello di imparare anche il fondo cielo (rumore).
         stars_mask = target > 0.02  
-        weight_map[stars_mask] = 100.0  # 100x invece di 500x per stabilità
+        weight_map[stars_mask] = 100.0  # 500x invece di 100x per stabilità
         
         loss = torch.mean(diff * weight_map)
         
