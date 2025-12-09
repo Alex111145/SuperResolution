@@ -30,14 +30,14 @@ except ImportError as e:
 # ================= HYPERPARAMETERS =================
 # BATCH SIZE: 4 Totali. 
 # Su 2 GPU = 2 immagini per GPU (Molto sicuro).
-BATCH_SIZE = 4        
+BATCH_SIZE = 2        
 
-ACCUM_STEPS = 32      
+ACCUM_STEPS = 64     
 LR = 2e-4
 TOTAL_EPOCHS = 300
 
-LOG_INTERVAL = 5      
-IMAGE_INTERVAL = 5    
+LOG_INTERVAL =1     
+IMAGE_INTERVAL = 1  
 
 # --- FIX STABILITÀ CUDA ---
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
