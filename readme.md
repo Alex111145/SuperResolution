@@ -13,8 +13,8 @@ Questa sezione spiega come configurare l'ambiente di lavoro, installare le dipen
 È fortemente consigliato l'uso di un ambiente virtuale (venv).
 
 ```bash
-# 1. Spostati nella cartella del progetto (SuperResolution-GTX5000-TRAIN-E-SANITY)
-cd SuperResolution-GTX5000-TRAIN-E-SANITY
+# 1. Spostati nella cartella del progetto (SuperResolution)
+cd SuperResolution
 
 # 2. Crea e attiva l'ambiente virtuale
 python3 -m venv venv
@@ -217,5 +217,6 @@ Durante il training, tutte le metriche (Loss, PSNR, ecc.) sono registrate.
 # Avvia TensorBoard dalla root del progetto
 tensorboard --logdir=outputs --port=6006 --bind_all
 ```
+
 
 Successivamente, apri l'URL fornito (es. `http://0.0.0.0:6006`) nel tuo browser.
