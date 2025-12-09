@@ -29,17 +29,25 @@ except ImportError:
 warnings.filterwarnings('ignore')
 
 # ================= CONFIGURAZIONE =================
+# Percorso dello script attuale (es: .../SuperResolution/scripts)
 CURRENT_SCRIPT_DIR = Path(__file__).resolve().parent
+
+# Root del progetto (es: .../SuperResolution)
 PROJECT_ROOT = CURRENT_SCRIPT_DIR.parent
+
 ROOT_DATA_DIR = PROJECT_ROOT / "data"
 LOG_DIR_ROOT = PROJECT_ROOT / "logs"
 
+# === PERCORSI DI INSTALLAZIONE ASTAP ===
+# DEFINIZIONE CHIAVE:
+# PROJECT_ROOT.parent risale di un livello sopra SuperResolution.
+# Quindi "astap_local" verrà creata ACCANTO alla cartella del progetto, non dentro.
+LOCAL_ASTAP_DIR = PROJECT_ROOT.parent / "astap_local"
+
 # === NOMI FILE .DEB ===
-# Lo script li cercherà sia nella root del progetto che nella cartella superiore
+# I file .deb vengono cercati prima in SuperResolution, poi nella cartella superiore.
 ASTAP_DEB_NAME = "astap_amd64.deb" 
 DB_DEB_NAME = "d50_star_database.deb" 
-
-LOCAL_ASTAP_DIR = PROJECT_ROOT / "astap_local"
 
 # === IMPOSTAZIONI TELESCOPIO ===
 FORCE_FOV = 0.46  
@@ -74,8 +82,10 @@ def make_executable(path):
 
 def extract_deb_file(deb_name, target_dir, description):
     """
-    Estrae un file .deb.
-    Cerca il file PRIMA nella cartella del progetto, POI nella cartella superiore.
+    Estrae un file .deb nella target_dir.
+    Logica di ricerca del .deb:
+    1. Cerca dentro la cartella del progetto (PROJECT_ROOT).
+    2. Cerca nella cartella superiore (PROJECT_ROOT.parent).
     """
     # 1. Cerca dentro SuperResolution
     deb_path = PROJECT_ROOT / deb_name
@@ -90,8 +100,13 @@ def extract_deb_file(deb_name, target_dir, description):
         print(f"   E anche in:    {PROJECT_ROOT.parent}")
         return False
 
-    print(f"📦 Trovato {deb_name}. Estrazione in corso...")
+    print(f"📦 Trovato {deb_name} in: {deb_path}")
+    print(f"📂 Estrazione in corso verso: {target_dir} ...")
+    
     try:
+        # Assicuriamoci che la cartella target esista
+        target_dir.mkdir(parents=True, exist_ok=True)
+        
         # dpkg -x estrae mantenendo la struttura delle cartelle
         subprocess.run(["dpkg", "-x", str(deb_path), str(target_dir)], check=True)
         print(f"✅ {description} estratto correttamente.")
@@ -106,20 +121,22 @@ def extract_deb_file(deb_name, target_dir, description):
 def setup_astap_environment():
     """
     Gestisce l'intera configurazione di ASTAP:
-    1. Crea la cartella locale
+    1. Crea la cartella locale (fuori da SuperResolution)
     2. Controlla/Estrae l'eseguibile
     3. Controlla/Estrae il database stellare
     """
+    # Crea la cartella "astap_local" di fianco al progetto
     LOCAL_ASTAP_DIR.mkdir(parents=True, exist_ok=True)
     
     # --- 1. CONTROLLO ESEGUIBILE ---
     # Cerchiamo l'eseguibile 'astap' dentro la cartella locale
+    # rglob cerca ricorsivamente perché dpkg crea sottocartelle (usr/bin/...)
     exe_found = list(LOCAL_ASTAP_DIR.rglob("astap"))
-    # Filtriamo solo i file binari (no .desktop)
+    # Filtriamo solo i file binari (no .desktop o cartelle)
     exe_path = next((p for p in exe_found if p.is_file() and not p.suffix), None)
     
     if not exe_path:
-        print("🔍 Eseguibile ASTAP non installato localmente. Cerco il .deb...")
+        print(f"🔍 Eseguibile ASTAP non trovato in {LOCAL_ASTAP_DIR}. Cerco il .deb...")
         if extract_deb_file(ASTAP_DEB_NAME, LOCAL_ASTAP_DIR, "Programma ASTAP"):
             # Cerchiamo di nuovo dopo l'estrazione
             exe_found = list(LOCAL_ASTAP_DIR.rglob("astap"))
@@ -136,7 +153,7 @@ def setup_astap_environment():
     db_files = list(LOCAL_ASTAP_DIR.rglob("*.500")) + list(LOCAL_ASTAP_DIR.rglob("*.290"))
     
     if not db_files:
-        print("🔍 Database stellare non trovato. Cerco il .deb...")
+        print(f"🔍 Database stellare non trovato in {LOCAL_ASTAP_DIR}. Cerco il .deb...")
         extract_deb_file(DB_DEB_NAME, LOCAL_ASTAP_DIR, "Database Stellare")
     else:
         print(f"✅ Database stellare rilevato ({len(db_files)} file).")
@@ -176,7 +193,7 @@ def solve_with_astap(inp_file, out_file, astap_exe, logger):
     try:
         shutil.copy2(inp_file, out_file)
         
-        # Check preventivo
+        # Check preventivo se già risolto
         try:
             with fits.open(out_file) as hdul:
                 for hdu in hdul:
@@ -211,6 +228,7 @@ def solve_with_astap(inp_file, out_file, astap_exe, logger):
                     except: pass
 
         if solved:
+            # Pulizia file temporanei astap
             for ext in ['.wcs', '.ini', '.axy', '.corr']:
                 try: os.remove(out_file.with_suffix(ext))
                 except: pass
