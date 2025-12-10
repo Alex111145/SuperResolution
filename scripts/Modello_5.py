@@ -6,6 +6,7 @@ from torch.utils.data import DataLoader
 from torchvision.utils import save_image
 from PIL import Image
 from tqdm import tqdm
+import shutil # NUOVO: Import per la creazione degli archivi ZIP
 
 torch.backends.cudnn.benchmark = True
 torch.backends.cuda.matmul.allow_tf32 = True
@@ -70,7 +71,7 @@ def select_target_from_menu(targets: list[str]) -> str | None:
 
 
 def run_test(target_name: str):
-    """Esegue il test (inferenza) per il target specificato."""
+    """Esegue il test (inferenza) per il target specificato e crea gli archivi ZIP."""
     
     # Percorsi dinamici basati sul target selezionato
     OUTPUT_DIR = OUTPUT_ROOT / target_name / "test_results_tiff"
@@ -89,7 +90,7 @@ def run_test(target_name: str):
     (OUTPUT_DIR / "tiff_science").mkdir(parents=True, exist_ok=True)
     (OUTPUT_DIR / "png_preview").mkdir(parents=True, exist_ok=True)
 
-    # NUOVA LOGICA PER IL NOME DELLA CARTELLA DATI
+    # LOGICA PER IL NOME DELLA CARTELLA DATI
     # Estrai la parte base del nome del target (es. M1_Worker_HAT_Medium -> M1)
     if '_' in target_name:
         data_target_name = target_name.split('_')[0]
@@ -98,7 +99,7 @@ def run_test(target_name: str):
 
     # Percorso per i file JSON degli split del dataset usando il nome dati corretto
     ROOT_DATA_DIR = PROJECT_ROOT / "data" 
-    splits_dir = ROOT_DATA_DIR / data_target_name / "8_dataset_split" / "splits_json" # <--- UTILIZZA data_target_name
+    splits_dir = ROOT_DATA_DIR / data_target_name / "8_dataset_split" / "splits_json" 
     test_json = splits_dir / "test.json"
     
     if not test_json.exists():
@@ -148,6 +149,46 @@ def run_test(target_name: str):
     print(f"   PSNR: {res['psnr']:.2f} dB")
     print(f"   SSIM: {res['ssim']:.4f}")
     print(f"📂 Output salvati in: {OUTPUT_DIR}")
+
+    # --- NUOVA LOGICA PER LA CREAZIONE DEGLI ARCHIVI ZIP ---
+    print("\n📦 Creazione archivi ZIP...")
+    
+    # Usiamo il nome del target dati come base per il nome del file ZIP (es. M1)
+    base_zip_name = data_target_name 
+    # Percorso dove salvare i file ZIP (nella cartella del target specifico del modello)
+    zip_root_dir = OUTPUT_ROOT / target_name
+
+    # 1. ZIP per tiff_science (risultati scientifici)
+    tiff_dir_to_zip = OUTPUT_DIR / "tiff_science"
+    if tiff_dir_to_zip.exists():
+        try:
+            # zip_name sarà [M1]_tiff_science
+            zip_name_path = zip_root_dir / f"{base_zip_name}_tiff_science"
+            shutil.make_archive(
+                base_name=str(zip_name_path), 
+                format='zip', 
+                root_dir=OUTPUT_DIR.parent, # Directory da cui partire (outputs/M1_Worker_HAT_Medium/)
+                base_dir=Path("test_results_tiff") / "tiff_science" # Sottodirectory da zippare
+            )
+            print(f"   ✅ Archivio ZIP creato per TIFFs: {zip_name_path.name}.zip")
+        except Exception as e:
+            print(f"   ❌ Errore ZIP TIFFs: {e}")
+
+    # 2. ZIP per png_preview (anteprime)
+    png_dir_to_zip = OUTPUT_DIR / "png_preview"
+    if png_dir_to_zip.exists():
+        try:
+            # zip_name sarà [M1]_png_preview
+            zip_name_path = zip_root_dir / f"{base_zip_name}_png_preview"
+            shutil.make_archive(
+                base_name=str(zip_name_path), 
+                format='zip', 
+                root_dir=OUTPUT_DIR.parent, 
+                base_dir=Path("test_results_tiff") / "png_preview"
+            )
+            print(f"   ✅ Archivio ZIP creato per PNGs: {zip_name_path.name}.zip")
+        except Exception as e:
+            print(f"   ❌ Errore ZIP PNGs: {e}")
 
 
 if __name__ == "__main__":
