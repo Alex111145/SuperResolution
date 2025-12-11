@@ -1,6 +1,7 @@
 import torch
 import torch.nn.functional as F
 from math import exp
+import sys
 
 # Tenta di importare piq per FSIM
 try:
@@ -11,7 +12,7 @@ except ImportError:
     print("⚠️  Libreria 'piq' non trovata. FSIM sarà 0. Installa con: pip install piq")
 
 def ssim_torch(img1, img2, window_size=11):
-    """Calcolo SSIM interno."""
+    """Calcolo SSIM interno (Fallback se piq non va)."""
     c = img1.size(1)
     gauss = torch.Tensor([exp(-(x - window_size//2)**2/float(2*1.5**2)) for x in range(window_size)])
     win = (gauss/gauss.sum()).unsqueeze(1).mm((gauss/gauss.sum()).unsqueeze(0)).unsqueeze(0).unsqueeze(0).expand(c,1,window_size,window_size).type_as(img1)
@@ -33,9 +34,9 @@ class Metrics:
         self.count = 0
         
     def update(self, p, t):
-        # Assicura range [0, 1]
-        p = p.clamp(0, 1)
-        t = t.clamp(0, 1)
+        # Assicura range [0, 1] e stacca dai grafi di calcolo
+        p = p.detach().clamp(0, 1)
+        t = t.detach().clamp(0, 1)
         
         batch_size = p.size(0)
 
@@ -44,12 +45,13 @@ class Metrics:
         
         # --- 2. Calcolo FSIM ---
         if PIQ_AVAILABLE:
-            try:
-                # piq.fsim restituisce uno scalare medio per il batch
-                val_fsim = fsim(p, t, data_range=1.0, reduction='mean')
-                self.fsim += val_fsim.item() * batch_size
-            except Exception:
-                pass 
+            # Check dimensioni: piq vuole (N, C, H, W)
+            if p.ndim == 3: p = p.unsqueeze(0)
+            if t.ndim == 3: t = t.unsqueeze(0)
+            
+            # Rimosso il try/except per vedere l'errore reale
+            val_fsim = fsim(p, t, data_range=1.0, reduction='mean')
+            self.fsim += val_fsim.item() * batch_size
         
         self.count += batch_size
         
@@ -61,7 +63,7 @@ class Metrics:
             'ssim': self.ssim / self.count,
             'fsim': self.fsim / self.count
         }
-    
-# Alias per compatibilità con script che importano TrainMetrics
+
+# Alias per compatibilità
 class TrainMetrics(Metrics):
     pass
