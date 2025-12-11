@@ -28,10 +28,10 @@ except ImportError as e:
 # ================= HYPERPARAMETERS TRAINING (A40 POWER) =================
 # Con 46GB di VRAM possiamo spingere molto.
 # Se crasha per memoria, scendi a 24 o 16.
-BATCH_SIZE = 10       
+BATCH_SIZE = 16       
 ACCUM_STEPS = 1       # Con batch 32 non serve accumulare gradienti
 LR = 2e-4             
-TOTAL_EPOCHS = 1000    
+TOTAL_EPOCHS = 100    
 
 LOG_INTERVAL = 1      
 IMAGE_INTERVAL = 10   
