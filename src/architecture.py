@@ -25,9 +25,9 @@ class TrainHybridModel(nn.Module):
             img_range=1.,          
             
             # Parametri Aumentati (Standard/Medium SwinIR)
-            depths=[6, 6, 6, 6, 6, 6],   # Più profondo (6 stadi)
-            embed_dim=180,               # Doppio delle feature (era 90)
-            num_heads=[6, 6, 6, 6, 6, 6],
+            depths=[8, 8, 8, 8],   # Più profondo (6 stadi)
+            embed_dim=96,               # Doppio delle feature (era 90)
+            num_heads=[6, 6, 6, 6],
             
             mlp_ratio=2,
             upsampler='pixelshuffle',
