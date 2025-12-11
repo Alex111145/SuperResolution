@@ -25,9 +25,9 @@ class TrainHybridModel(nn.Module):
             img_range=1.,          
             
             # Parametri Ottimizzati per RTX/GTX
-            depths=[8, 8, 8, 8, 8, 8,8],   # Profondità invariata (ottima qualità)
-            embed_dim=180,                # RIDOTTO da 180 a 96 (Risparmia molta VRAM)
-            num_heads=[6, 6, 6, 6, 6, 6,6],
+            depths=[8, 8, 8, 8, 8, 8,8,8],   # Profondità invariata (ottima qualità)
+            embed_dim=360,                # RIDOTTO da 180 a 96 (Risparmia molta VRAM)
+            num_heads=[8, 8, 8, 8, 8, 8, 8, 8],
             
             mlp_ratio=2,
             upsampler='pixelshuffle',
