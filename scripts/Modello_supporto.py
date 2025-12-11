@@ -25,18 +25,21 @@ try:
 except ImportError as e:
     sys.exit(f"❌ Errore Import Training Modules: {e}")
 
-# ================= HYPERPARAMETERS TRAINING (A40 POWER) =================
-# Con 46GB di VRAM possiamo spingere molto.
-# Se crasha per memoria, scendi a 24 o 16.
-BATCH_SIZE = 16       
-ACCUM_STEPS = 1       # Con batch 32 non serve accumulare gradienti
+# ================= HYPERPARAMETERS TRAINING (FIX STABILITÀ GTX/RTX) =================
+
+BATCH_SIZE = 4        # Basso per evitare OOM e instabilità
+ACCUM_STEPS = 16      # 2 * 16 = 32 (Batch Size Effettivo simulato)
 LR = 2e-4             
 TOTAL_EPOCHS = 100    
 
 LOG_INTERVAL = 1      
 IMAGE_INTERVAL = 10   
 
-torch.backends.cudnn.benchmark = True 
+# --- FIX CRITICO PER "ILLEGAL MEMORY ACCESS" ---
+# benchmark=True può causare crash su alcune GPU durante la selezione dell'algoritmo.
+# Lo disabilitiamo per stabilità.
+torch.backends.cudnn.benchmark = False 
+torch.backends.cudnn.deterministic = True
 
 def train_worker(args):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -67,13 +70,20 @@ def train_worker(args):
     train_ds = AstronomicalDataset(ft_path, base_path=PROJECT_ROOT, augment=True)
     val_ds = AstronomicalDataset(fv_path, base_path=PROJECT_ROOT, augment=False)
     
-    curr_batch = BATCH_SIZE
-    
-    # Aumentiamo num_workers a 8 o 16 per nutrire velocemente la GPU
-    train_loader = DataLoader(train_ds, batch_size=curr_batch, shuffle=True, num_workers=16, pin_memory=True, drop_last=True)
-    val_loader = DataLoader(val_ds, batch_size=1, shuffle=False, num_workers=4)
+    # Num workers basso e pin_memory=False per massima stabilità su Workstation
+    train_loader = DataLoader(
+        train_ds, 
+        batch_size=BATCH_SIZE, 
+        shuffle=True, 
+        num_workers=2,      # Ridotto per evitare overhead CPU
+        pin_memory=False,   # DISABILITATO per evitare problemi di memoria condivisa
+        drop_last=True
+    )
+    val_loader = DataLoader(val_ds, batch_size=1, shuffle=False, num_workers=2)
 
-    print(f"   🔥 Init TrainHybridModel (SwinIR) - Batch: {BATCH_SIZE}...")
+    print(f"   🔥 Init TrainHybridModel (SwinIR) - Batch: {BATCH_SIZE} | Accum: {ACCUM_STEPS}")
+    print(f"      CUDNN Benchmark: DISABLED (Stability Mode)")
+    
     model = TrainHybridModel(smoothing=None, device=device).to(device)
     
     if num_gpus > 1: model = nn.DataParallel(model)
@@ -84,6 +94,8 @@ def train_worker(args):
     criterion = TrainStarLoss().to(device)
     scaler = torch.cuda.amp.GradScaler() 
     best_ssim = 0.0
+
+    print("   🚀 Avvio Training...")
 
     for epoch in range(1, TOTAL_EPOCHS + 1):
         model.train()
@@ -96,11 +108,13 @@ def train_worker(args):
             lr = batch['lr'].to(device, non_blocking=True)
             hr = batch['hr'].to(device, non_blocking=True)
             
+            # Autocast protetto
             with torch.amp.autocast('cuda'):
                 pred = model(lr)
                 loss, _ = criterion(pred, hr)
                 loss = loss / ACCUM_STEPS
             
+            # Backward pass con Scaler
             scaler.scale(loss).backward()
             acc_loss += loss.item() * ACCUM_STEPS
             
@@ -119,6 +133,8 @@ def train_worker(args):
             
             model.eval()
             metrics = TrainMetrics()
+            
+            # Valutazione
             with torch.inference_mode(): 
                 for v_batch in val_loader:
                     v_lr = v_batch['lr'].to(device)
