@@ -16,12 +16,13 @@ CURRENT_SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = CURRENT_SCRIPT_DIR.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-# IMPORT MODULI TRAINING (Usa architecture_train.py che ora contiene SwinIR)
+# IMPORT MODULI TRAINING (CORRETTI PER QUESTA VERSIONE)
 try:
-    from src.architecture_train import TrainHybridModel
+    # MODIFICATO: Rimossi i suffissi '_train' dai nomi dei file
+    from src.architecture import TrainHybridModel
     from src.dataset import AstronomicalDataset
-    from src.losses_train import TrainStarLoss
-    from src.metrics import Metrics as TrainMetrics # Usa le metriche aggiornate con FSIM
+    from src.losses import TrainStarLoss
+    from src.metrics import Metrics as TrainMetrics 
 except ImportError as e:
     sys.exit(f"❌ Errore Import Training Modules: {e}")
 
@@ -29,7 +30,7 @@ except ImportError as e:
 BATCH_SIZE = 2        
 ACCUM_STEPS = 4       # Accumulo gradienti per stabilità Transformer
 LR = 2e-4             # Learning Rate specifico per SwinIR
-TOTAL_EPOCHS = 300    
+TOTAL_EPOCHS = 1000    
 
 LOG_INTERVAL = 1      
 IMAGE_INTERVAL = 10   
@@ -53,7 +54,7 @@ def train_worker(args):
     splits_dir = PROJECT_ROOT / "data" / args.target / "8_dataset_split" / "splits_json"
     
     if not splits_dir.exists():
-        sys.exit(f"❌ Splits non trovati in {splits_dir}. Esegui Train_Prepare_0.py!")
+        sys.exit(f"❌ Splits non trovati in {splits_dir}. Esegui Dataset_1.py (o Modello_2.py)!")
 
     # Dataset Reale -> File temporanei
     with open(splits_dir / "train.json") as f: train_data = json.load(f)
@@ -73,6 +74,7 @@ def train_worker(args):
     val_loader = DataLoader(val_ds, batch_size=1, shuffle=False, num_workers=2)
 
     print(f"   🔥 Init TrainHybridModel (SwinIR)...")
+    # Nota: smoothing=None è corretto per architecture.py di SwinIR
     model = TrainHybridModel(smoothing=None, device=device).to(device)
     
     if num_gpus > 1: model = nn.DataParallel(model)
