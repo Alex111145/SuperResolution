@@ -16,9 +16,8 @@ CURRENT_SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = CURRENT_SCRIPT_DIR.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-# IMPORT MODULI TRAINING (CORRETTI PER QUESTA VERSIONE)
+# IMPORT MODULI TRAINING
 try:
-    # MODIFICATO: Rimossi i suffissi '_train' dai nomi dei file
     from src.architecture import TrainHybridModel
     from src.dataset import AstronomicalDataset
     from src.losses import TrainStarLoss
@@ -26,10 +25,12 @@ try:
 except ImportError as e:
     sys.exit(f"❌ Errore Import Training Modules: {e}")
 
-# ================= HYPERPARAMETERS TRAINING (SWIN) =================
-BATCH_SIZE = 2        
-ACCUM_STEPS = 4       # Accumulo gradienti per stabilità Transformer
-LR = 2e-4             # Learning Rate specifico per SwinIR
+# ================= HYPERPARAMETERS TRAINING (A40 POWER) =================
+# Con 46GB di VRAM possiamo spingere molto.
+# Se crasha per memoria, scendi a 24 o 16.
+BATCH_SIZE = 10       
+ACCUM_STEPS = 1       # Con batch 32 non serve accumulare gradienti
+LR = 2e-4             
 TOTAL_EPOCHS = 1000    
 
 LOG_INTERVAL = 1      
@@ -41,7 +42,6 @@ def train_worker(args):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     num_gpus = torch.cuda.device_count()
     
-    # Nome output coerente
     target_name = f"{args.target}_SwinIR_FULL_TRAIN"
     out_dir = PROJECT_ROOT / "outputs" / target_name
     save_dir = out_dir / "checkpoints"
@@ -54,9 +54,8 @@ def train_worker(args):
     splits_dir = PROJECT_ROOT / "data" / args.target / "8_dataset_split" / "splits_json"
     
     if not splits_dir.exists():
-        sys.exit(f"❌ Splits non trovati in {splits_dir}. Esegui Dataset_1.py (o Modello_2.py)!")
+        sys.exit(f"❌ Splits non trovati in {splits_dir}. Esegui Dataset_1.py!")
 
-    # Dataset Reale -> File temporanei
     with open(splits_dir / "train.json") as f: train_data = json.load(f)
     with open(splits_dir / "val.json") as f: val_data = json.load(f)
     
@@ -70,11 +69,11 @@ def train_worker(args):
     
     curr_batch = BATCH_SIZE
     
-    train_loader = DataLoader(train_ds, batch_size=curr_batch, shuffle=True, num_workers=4, pin_memory=True, drop_last=True)
-    val_loader = DataLoader(val_ds, batch_size=1, shuffle=False, num_workers=2)
+    # Aumentiamo num_workers a 8 o 16 per nutrire velocemente la GPU
+    train_loader = DataLoader(train_ds, batch_size=curr_batch, shuffle=True, num_workers=16, pin_memory=True, drop_last=True)
+    val_loader = DataLoader(val_ds, batch_size=1, shuffle=False, num_workers=4)
 
-    print(f"   🔥 Init TrainHybridModel (SwinIR)...")
-    # Nota: smoothing=None è corretto per architecture.py di SwinIR
+    print(f"   🔥 Init TrainHybridModel (SwinIR) - Batch: {BATCH_SIZE}...")
     model = TrainHybridModel(smoothing=None, device=device).to(device)
     
     if num_gpus > 1: model = nn.DataParallel(model)
@@ -119,7 +118,7 @@ def train_worker(args):
             writer.add_scalar('Train/Loss', avg_loss, epoch)
             
             model.eval()
-            metrics = TrainMetrics() # Usa la classe con FSIM e SSIM
+            metrics = TrainMetrics()
             with torch.inference_mode(): 
                 for v_batch in val_loader:
                     v_lr = v_batch['lr'].to(device)
