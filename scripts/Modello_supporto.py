@@ -96,7 +96,7 @@ def train_worker(args):
             lr = batch['lr'].to(device, non_blocking=True)
             hr = batch['hr'].to(device, non_blocking=True)
             
-            with torch.cuda.amp.autocast():
+            with torch.amp.autocast('cuda'):
                 pred = model(lr)
                 loss, _ = criterion(pred, hr)
                 loss = loss / ACCUM_STEPS
@@ -123,7 +123,7 @@ def train_worker(args):
                 for v_batch in val_loader:
                     v_lr = v_batch['lr'].to(device)
                     v_hr = v_batch['hr'].to(device)
-                    with torch.cuda.amp.autocast():
+                    with torch.amp.autocast('cuda'):
                         v_pred = model(v_lr)
                     metrics.update(v_pred.float(), v_hr.float())
             
