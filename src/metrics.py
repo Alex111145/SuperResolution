@@ -49,8 +49,8 @@ class Metrics:
             if p.ndim == 3: p = p.unsqueeze(0)
             if t.ndim == 3: t = t.unsqueeze(0)
             
-            # Rimosso il try/except per vedere l'errore reale
-            val_fsim = fsim(p, t, data_range=1.0, reduction='mean')
+            # CORREZIONE: chromatic=False per immagini grayscale (1 canale)
+            val_fsim = fsim(p, t, data_range=1.0, reduction='mean', chromatic=False)
             self.fsim += val_fsim.item() * batch_size
         
         self.count += batch_size
