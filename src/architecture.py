@@ -14,9 +14,9 @@ class TrainHybridModel(nn.Module):
         if SwinIR_Arch is None:
             raise ImportError("❌ ERRORE CRITICO: SwinIR non trovato.")
         
-        print("🏗️  Model Arch: SwinIR-Standard (High Quality) x4 [TRAIN MODE]")
+        print("🏗️  Model Arch: SwinIR-Standard (Balanced) x4 [TRAIN MODE]")
         
-        # CONFIGURAZIONE SWINIR POTENZIATA PER A40
+        # CONFIGURAZIONE SWINIR BILANCIATA (PER GPU < 24GB)
         self.model = SwinIR_Arch(
             upscale=4,             
             in_chans=1,            
@@ -24,10 +24,10 @@ class TrainHybridModel(nn.Module):
             window_size=8,         
             img_range=1.,          
             
-            # Parametri Aumentati (Standard/Medium SwinIR)
-            depths=[8, 8, 8, 8],   # Più profondo (6 stadi)
-            embed_dim=96,               # Doppio delle feature (era 90)
-            num_heads=[6, 6, 6, 6],
+            # Parametri Ottimizzati per RTX/GTX
+            depths=[8, 8, 8, 8, 8, 8,8],   # Profondità invariata (ottima qualità)
+            embed_dim=180,                # RIDOTTO da 180 a 96 (Risparmia molta VRAM)
+            num_heads=[6, 6, 6, 6, 6, 6,6],
             
             mlp_ratio=2,
             upsampler='pixelshuffle',
