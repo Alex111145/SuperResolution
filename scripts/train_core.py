@@ -31,7 +31,7 @@ except ImportError as e:
 BATCH_SIZE = 3      # Con 3 GPU = 48 totali. Con le A40 puoi anche salire a 32 (96 tot)
 ACCUM_STEPS = 1      # Con DDP e batch alto, spesso non serve accumulare troppo
 LR = 2e-4             
-TOTAL_EPOCHS = 200    
+TOTAL_EPOCHS = 1000    
 LOG_INTERVAL = 1      
 IMAGE_INTERVAL = 10   
 
