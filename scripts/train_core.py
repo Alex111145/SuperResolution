@@ -71,9 +71,11 @@ def run_ddp_worker(args):
     # Percorsi output
     out_dir = PROJECT_ROOT / "outputs" / f"{target_output_name}_DDP"
     splits_dir_temp = out_dir / "temp_splits" # Directory temporanea per i JSON aggregati
+    
+    # [MODIFICA] Definiamo save_dir per TUTTI i rank, perché tutti devono sapere da dove caricare il resume
+    save_dir = out_dir / "checkpoints"
 
     if is_master:
-        save_dir = out_dir / "checkpoints"
         img_dir = out_dir / "images"
         log_dir = out_dir / "tensorboard"
         for d in [save_dir, img_dir, log_dir, splits_dir_temp]: d.mkdir(parents=True, exist_ok=True)
@@ -135,10 +137,38 @@ def run_ddp_worker(args):
     try: scaler = torch.amp.GradScaler('cuda')
     except: scaler = torch.cuda.amp.GradScaler()
 
+    # --- [NUOVO] LOGICA DI RESUME (RIPRESA) ---
+    start_epoch = 1
     best_psnr = 0.0
+    latest_ckpt_path = save_dir / "latest_checkpoint.pth"
+
+    # Tutti i rank controllano se esiste un checkpoint di resume
+    if latest_ckpt_path.exists():
+        # Map location è cruciale per evitare OOM o device mismatch in DDP
+        map_location = {'cuda:%d' % 0: 'cuda:%d' % local_rank}
+        checkpoint = torch.load(latest_ckpt_path, map_location=map_location)
+        
+        # Caricamento stati
+        model.module.load_state_dict(checkpoint['model_state_dict'])
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+        
+        # Ripristino variabili loop
+        start_epoch = checkpoint['epoch'] + 1
+        best_psnr = checkpoint['best_psnr']
+        
+        # Se presente lo scaler state (buona norma per mixed precision)
+        if 'scaler_state_dict' in checkpoint:
+            scaler.load_state_dict(checkpoint['scaler_state_dict'])
+            
+        if is_master:
+            print(f"♻️  CHECKPOINT TROVATO! Riprendo dall'epoca {start_epoch-1} (Best PSNR: {best_psnr:.2f})")
+    
+    dist.barrier() # Sincronizziamo tutti prima di partire
 
     # === LOOP DI TRAINING ===
-    for epoch in range(1, TOTAL_EPOCHS + 1):
+    # [MODIFICA] Il range parte da start_epoch invece che da 1
+    for epoch in range(start_epoch, TOTAL_EPOCHS + 1):
         train_sampler.set_epoch(epoch)
         model.train()
         acc_loss = 0.0
@@ -195,7 +225,7 @@ def run_ddp_worker(args):
                 writer.add_scalar('Val/PSNR', res['psnr'], epoch)
                 print(f" Ep {epoch:04d} | Loss: {avg_loss:.4f} | PSNR: {res['psnr']:.2f} dB")
 
-                # Salvataggio checkpoint
+                # Salvataggio checkpoint MIGLIORE
                 state = model.module.state_dict()
                 if res['psnr'] > best_psnr:
                     best_psnr = res['psnr']
@@ -208,6 +238,19 @@ def run_ddp_worker(args):
                     vutils.save_image(comp, img_dir / f"train_epoch_{epoch}.png")
                 
                 model.train() # Torna in modalità train
+
+        # --- [NUOVO] SALVATAGGIO CHECKPOINT DI RESUME ---
+        # Salviamo SEMPRE alla fine di ogni epoca (o ogni N epoche) lo stato completo
+        if is_master:
+            checkpoint_data = {
+                'epoch': epoch,
+                'model_state_dict': model.module.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'scheduler_state_dict': scheduler.state_dict(),
+                'scaler_state_dict': scaler.state_dict(),
+                'best_psnr': best_psnr
+            }
+            torch.save(checkpoint_data, latest_ckpt_path)
 
     # --- 5. Pulizia file temporanei ---
     try:
