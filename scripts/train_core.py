@@ -15,6 +15,12 @@ from pathlib import Path
 from tqdm import tqdm
 import subprocess
 import signal
+import warnings
+
+# --- 1. SOPPRESSIONE WARNING SPECIFICI ---
+warnings.filterwarnings("ignore") # Ignora warning generici
+# Filtra specificamente il warning sui gradient strides di DDP
+warnings.filterwarnings("ignore", message="Grad strides do not match bucket view strides") 
 
 # --- CONFIGURAZIONE PERCORSI ---
 CURRENT_SCRIPT_DIR = Path(__file__).resolve().parent
@@ -32,18 +38,19 @@ except ImportError as e:
     sys.exit(f"❌ Errore Import: Assicurati che 'src/' contenga i moduli necessari. Errore: {e}")
 
 # === HYPERPARAMETERS ===
-BATCH_SIZE = 3 	 	
-ACCUM_STEPS = 4 	
-LR = 2e-4 	 	 	
-TOTAL_EPOCHS = 500 	
-LOG_INTERVAL = 1    # Validiamo ogni epoca per sicurezza ora
-IMAGE_INTERVAL = 5 	
+BATCH_SIZE = 1      
+ACCUM_STEPS = 4     
+LR = 2e-4           
+TOTAL_EPOCHS = 500  
+LOG_INTERVAL = 5    
+IMAGE_INTERVAL = 10     
 
 # --- UTILITY DDP ---
 
 def setup():
     dist.init_process_group(backend="nccl")
     torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
+    torch.backends.cudnn.benchmark = True
 
 def cleanup():
     if dist.is_initialized():
@@ -96,7 +103,6 @@ def run_ddp_worker(args):
     train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=False, 
                               num_workers=4, pin_memory=True, sampler=train_sampler, drop_last=True)
     
-    # Validazione Distribuita: ogni GPU valida un pezzo
     val_sampler = DistributedSampler(val_ds, shuffle=False)
     val_loader = DataLoader(val_ds, batch_size=1, shuffle=False, num_workers=2, sampler=val_sampler)
 
@@ -109,7 +115,7 @@ def run_ddp_worker(args):
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=TOTAL_EPOCHS, eta_min=1e-7)
     criterion = TrainStarLoss(vgg_weight=0.1).to(device)
     
-    scaler = torch.cuda.amp.GradScaler()
+    scaler = torch.amp.GradScaler('cuda')
 
     best_psnr = 0.0
 
@@ -118,7 +124,9 @@ def run_ddp_worker(args):
         train_sampler.set_epoch(epoch)
         model.train()
         acc_loss = 0.0
-        optimizer.zero_grad()
+        
+        # 'set_to_none=True' aiuta a evitare problemi di strides
+        optimizer.zero_grad(set_to_none=True) 
         
         loader_iter = tqdm(train_loader, desc=f"Ep {epoch}", ncols=100, leave=False) if is_master else train_loader
 
@@ -126,7 +134,7 @@ def run_ddp_worker(args):
             lr_img = batch['lr'].to(device, non_blocking=True)
             hr_img = batch['hr'].to(device, non_blocking=True)
             
-            with torch.cuda.amp.autocast():
+            with torch.amp.autocast('cuda'):
                 pred = model(lr_img)
                 loss, _ = criterion(pred, hr_img)
                 loss = loss / ACCUM_STEPS 
@@ -138,7 +146,7 @@ def run_ddp_worker(args):
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 scaler.step(optimizer)
                 scaler.update()
-                optimizer.zero_grad()
+                optimizer.zero_grad(set_to_none=True)
             
             acc_loss += loss.item() * ACCUM_STEPS
 
@@ -146,29 +154,26 @@ def run_ddp_worker(args):
         
         # --- VALIDAZIONE E SINCRONIZZAZIONE ---
         if epoch % LOG_INTERVAL == 0:
-            # 1. Calcolo Loss Media Training
-            dist.barrier() # Tutti aspettano qui
+            dist.barrier()
             loss_tensor = torch.tensor(acc_loss, device=device)
             dist.all_reduce(loss_tensor, op=dist.ReduceOp.SUM)
             avg_loss = loss_tensor.item() / (len(train_loader) * world_size)
 
-            # 2. Esecuzione Validazione (SU TUTTI I RANK)
             model.eval()
             local_metrics = TrainMetrics()
             
-            # Solo il master mostra la barra di progresso
             val_iter = tqdm(val_loader, desc="Val", ncols=50, leave=False) if is_master else val_loader
             
             with torch.inference_mode():
                 for v_batch in val_iter:
                     v_lr = v_batch['lr'].to(device)
                     v_hr = v_batch['hr'].to(device)
-                    with torch.cuda.amp.autocast():
+                    
+                    with torch.amp.autocast('cuda'):
                         v_pred = model(v_lr)
+                    
                     local_metrics.update(v_pred.float(), v_hr.float())
             
-            # 3. Aggregazione Metriche (Somma di PSNR e Count da tutti i rank)
-            # Accediamo direttamente agli attributi interni per sommarli
             total_psnr_tensor = torch.tensor(local_metrics.psnr, device=device)
             total_count_tensor = torch.tensor(local_metrics.count, device=device)
             
@@ -177,7 +182,6 @@ def run_ddp_worker(args):
             
             global_avg_psnr = total_psnr_tensor.item() / total_count_tensor.item()
 
-            # 4. Master: Log e Salvataggio
             if is_master:
                 writer.add_scalar('Train/Loss', avg_loss, epoch)
                 writer.add_scalar('Val/PSNR', global_avg_psnr, epoch)
@@ -189,15 +193,13 @@ def run_ddp_worker(args):
                     print("   🏆 Nuovo Best PSNR!")
                     torch.save(state, save_dir / "best_train_model.pth")
                 
-                # Salvataggio immagine debug (solo ultima batch del master)
                 if epoch % IMAGE_INTERVAL == 0:
                     v_lr_up = torch.nn.functional.interpolate(v_lr, size=(512,512), mode='nearest')
                     comp = torch.cat((v_lr_up, v_pred, v_hr), dim=3).clamp(0,1)
                     vutils.save_image(comp, img_dir / f"train_epoch_{epoch}.png")
 
-            # 5. IMPORTANTE: Sincronizzazione finale prima di ripartire
             dist.barrier()
-            model.train() # Tutti tornano in train mode insieme
+            model.train()
 
     cleanup()
 
