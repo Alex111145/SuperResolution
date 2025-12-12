@@ -17,6 +17,7 @@ import warnings
 from concurrent.futures import ProcessPoolExecutor
 from reproject import reproject_interp 
 import threading
+import math
 
 # --- CONFIGURAZIONE ---
 warnings.filterwarnings('ignore')
@@ -27,10 +28,20 @@ ROOT_DATA_DIR = PROJECT_ROOT / "data"
 
 HR_SIZE = 512 
 AI_LR_SIZE = 128
-STRIDE = 50
+REF_STRIDE = 40 
 MIN_COVERAGE = 0.50 
 MIN_PIXEL_VALUE = 0.0001 
 DEBUG_SAMPLES = 50
+
+# --- DATI DI CALIBRAZIONE (STRIDE 40) ---
+REF_YIELDS = {
+    "M1": 850,
+    "M82": 1400,
+    "M8": 180,   
+    "M33": 490,
+    "M42": 1200,
+    "NGC": 1200  
+}
 
 # Globali per il multiprocessing
 log_lock = threading.Lock()
@@ -57,18 +68,14 @@ def get_robust_preview(data, size=None):
         return np.zeros_like(data)
 
 def calculate_wcs_corners(wcs, size):
-    corner_pixels = np.array([
-        [0, 0], [size, 0], [0, size], [size, size]
-    ])
     center_world = wcs.pixel_to_world(size/2, size/2)
     return center_world.ra.deg, center_world.dec.deg
 
 def save_diagnostic_card(data_h_orig, data_o_raw_orig, 
-                         patch_h, patch_o_lr, 
-                         x, y, wcs_h, wcs_o_raw,
-                         lr_wcs_target, 
-                         h_fov_deg, save_path):
-    
+                          patch_h, patch_o_lr, 
+                          x, y, wcs_h, wcs_o_raw,
+                          lr_wcs_target, 
+                          h_fov_deg, save_path):
     try:
         fig = plt.figure(figsize=(20, 12), facecolor='#1e1e1e') 
         gs = fig.add_gridspec(2, 3)
@@ -82,9 +89,7 @@ def save_diagnostic_card(data_h_orig, data_o_raw_orig,
         mismatch_ra = abs(h_ra - lr_ra) * 3600
         mismatch_dec = abs(h_dec - lr_dec) * 3600
 
-        lr_corners_pix = np.array([
-            [0, 0], [AI_LR_SIZE, 0], [AI_LR_SIZE, AI_LR_SIZE], [0, AI_LR_SIZE]
-        ])
+        lr_corners_pix = np.array([[0, 0], [AI_LR_SIZE, 0], [AI_LR_SIZE, AI_LR_SIZE], [0, AI_LR_SIZE]])
         lr_corners_world = lr_wcs_target.pixel_to_world(lr_corners_pix[:, 0], lr_corners_pix[:, 1])
         obs_corners_pix_raw = wcs_o_raw.world_to_pixel(lr_corners_world)
         
@@ -155,6 +160,43 @@ def save_diagnostic_card(data_h_orig, data_o_raw_orig,
     except Exception as e:
         print(f"\n❌ ERRORE PNG: {e}")
 
+# --- LOGICA CALCOLO STRIDE ---
+
+def calculate_stride_for_target(folder_name, desired_count):
+    """Calcola lo stride specifico per una cartella dato un obiettivo globale"""
+    folder_upper = folder_name.upper()
+    
+    ref_yield = None
+    target_key = None
+
+    sorted_keys = sorted(REF_YIELDS.keys(), key=len, reverse=True)
+    
+    for key in sorted_keys:
+        if key in folder_upper:
+            ref_yield = REF_YIELDS[key]
+            target_key = key
+            break
+            
+    print(f"   ℹ️  Info: {folder_name} identificato come {target_key if target_key else 'Unknown'}")
+
+    if not desired_count:
+        print("   🔹 Uso stride di default (40px)")
+        return REF_STRIDE
+
+    if ref_yield:
+        factor = math.sqrt(ref_yield / desired_count)
+        new_stride = int(REF_STRIDE * factor)
+        
+        if new_stride < 10: 
+            print("   ⚠️  Stride calcolato troppo basso (<10). Imposto a 10.")
+            new_stride = 10
+            
+        print(f"   🧮 Stride adattivo: {new_stride}px (Base: {ref_yield} -> Target: {desired_count})")
+        return new_stride
+    else:
+        print(f"   ⚠️  Nessun dato storico per '{folder_name}'. Uso stride default {REF_STRIDE}px.")
+        return REF_STRIDE
+
 # --- LOGICA MULTIPROCESSING ---
 
 def init_worker(d_h, hdr_h, w_h, out_fits, out_png, h_fov_deg, o_files):
@@ -170,16 +212,12 @@ def init_worker(d_h, hdr_h, w_h, out_fits, out_png, h_fov_deg, o_files):
 
 def create_aligned_lr_wcs(hr_patch_wcs, hr_size, lr_size):
     factor = hr_size / lr_size
-    
     w_lr = hr_patch_wcs.deepcopy()
-    
     if w_lr.wcs.has_cd():
         w_lr.wcs.cd *= factor
     else:
         w_lr.wcs.cdelt *= factor
-        
     w_lr.wcs.crpix /= factor
-    
     return w_lr
 
 def process_single_patch_multi(args):
@@ -195,7 +233,6 @@ def process_single_patch_multi(args):
         return 0
 
     patch_h_wcs = wcs_h[y:y+HR_SIZE, x:x+HR_SIZE]
-
     lr_target_wcs = create_aligned_lr_wcs(patch_h_wcs, HR_SIZE, AI_LR_SIZE)
     
     saved_count = 0
@@ -246,13 +283,11 @@ def process_single_patch_multi(args):
             
     return saved_count
 
-# --- MENU SELEZIONE AGGIORNATO ---
+# --- MENU SELEZIONE MULTIPLA ---
 
-def select_target_directory():
-    # Elenca tutte le directory, escludendo cartelle di sistema
+def select_target_directories():
     all_subdirs = [d for d in ROOT_DATA_DIR.iterdir() if d.is_dir() and d.name not in ['splits', 'logs']]
     
-    # Filtra: mostra solo le cartelle che hanno '3_registered_native'
     valid_subdirs = [
         d for d in all_subdirs 
         if (d / '3_registered_native').exists() and (d / '3_registered_native').is_dir()
@@ -260,122 +295,148 @@ def select_target_directory():
 
     if not valid_subdirs: 
         print(f"\n❌ Nessuna directory valida trovata in {ROOT_DATA_DIR}")
-        print("(Nessuna cartella contiene '3_registered_native')")
-        return None
+        return []
 
-    print("\nSELEZIONA TARGET (Solo registrati):")
+    print("\nSELEZIONA TARGET (Multipla):")
+    print(f" 0: 🌟 PROCESSA TUTTI (Tutte le {len(valid_subdirs)} cartelle)")
     for i, d in enumerate(valid_subdirs): 
         print(f" {i+1}: {d.name}")
         
+    print("\nIstruzioni: Inserisci i numeri separati da virgola (es: 1,3,5) oppure '0' per tutti.")
+    
     try:
         raw_val = input("Scelta: ")
-        if not raw_val.strip(): return None
-        idx = int(raw_val) - 1
-        return valid_subdirs[idx] if 0 <= idx < len(valid_subdirs) else None
+        if not raw_val.strip(): return []
+        
+        if raw_val.strip() == '0' or raw_val.strip().lower() == 'all':
+            return valid_subdirs
+            
+        selected_indices = [int(x.strip()) - 1 for x in raw_val.split(',') if x.strip().isdigit()]
+        selected_dirs = []
+        
+        for idx in selected_indices:
+            if 0 <= idx < len(valid_subdirs):
+                selected_dirs.append(valid_subdirs[idx])
+            else:
+                print(f"⚠️  Indice {idx+1} non valido, ignorato.")
+                
+        return selected_dirs
+        
     except ValueError: 
-        return None
+        print("❌ Errore nel formato input.")
+        return []
 
 # --- MAIN ---
 
 def main():
-    print(f"🚀 ESTRAZIONE PATCH WCS-AWARE")
-    print(f"   Config: HR={HR_SIZE}px, LR={AI_LR_SIZE}px")
+    print(f"🚀 ESTRAZIONE PATCH MULTIPLA & DINAMICA")
     
-    # Gestione argomento da riga di comando o menu
-    target_dir = None
+    target_dirs = []
+    
     if len(sys.argv) > 1: 
-        target_dir = Path(sys.argv[1])
+        target_dirs = [Path(sys.argv[1])]
     else:
-        target_dir = select_target_directory()
+        target_dirs = select_target_directories()
         
-    if not target_dir:
+    if not target_dirs:
         print("❌ Nessun target selezionato. Esco.")
         return
     
-    print(f"\n📂 Target: {target_dir.name}")
-    
-    input_h = target_dir / '3_registered_native' / 'hubble'
-    input_o = target_dir / '3_registered_native' / 'observatory'
-    
-    out_fits = target_dir / '6_patches_final'
-    out_png = target_dir / '6_debug_visuals' 
-    
-    if out_fits.exists(): shutil.rmtree(out_fits)
-    out_fits.mkdir(parents=True)
-    if out_png.exists(): shutil.rmtree(out_png)
-    out_png.mkdir(parents=True)
-    
-    h_files = sorted(list(input_h.glob("*.fits")))
-    o_files_all = sorted(list(input_o.glob("*.fits")))
-    
-    if not h_files or not o_files_all:
-        print("❌ File mancanti in 3_registered_native")
-        return
+    print(f"\n✅ Hai selezionato {len(target_dirs)} cartelle.")
 
-    h_master_path = h_files[0]
+    global_desired_count = None
     try:
-        with fits.open(h_master_path) as h:
-            d_h = np.nan_to_num(h[0].data)
-            if d_h.ndim > 2: d_h = d_h[0]
-            w_h = WCS(h[0].header)
-            h_head = h[0].header
-            
-        h_scale = get_pixel_scale_deg(w_h)
-        h_fov_deg = h_scale * HR_SIZE
-        h_center = w_h.wcs.crval
-        
-    except Exception as e:
-        print(f"❌ Errore lettura Hubble: {e}")
-        return
+        print("\n" + "="*50)
+        raw_input = input("🔢 Quante patch desideri per OGNI target? (Premi INVIO per default 40px): ")
+        if raw_input.strip():
+            global_desired_count = int(raw_input)
+            print(f"🎯 Obiettivo fissato: ~{global_desired_count} patch per cartella.")
+        else:
+            print("👌 Nessun obiettivo specifico. Userò stride fisso (40px).")
+    except ValueError:
+        print("❌ Input non valido. Userò stride fisso.")
 
-    o_files_good = []
-    print(f"   🔍 Filtraggio file non allineati...")
-    for f in o_files_all:
+    for i, target_dir in enumerate(target_dirs):
+        print(f"\n" + "#"*60)
+        print(f"📦 [{i+1}/{len(target_dirs)}] PROCESSING: {target_dir.name}")
+        print("#"*60)
+        
+        calculated_stride = calculate_stride_for_target(target_dir.name, global_desired_count)
+
+        input_h = target_dir / '3_registered_native' / 'hubble'
+        input_o = target_dir / '3_registered_native' / 'observatory'
+        
+        out_fits = target_dir / '6_patches_final'
+        out_png = target_dir / '6_debug_visuals' 
+        
+        if out_fits.exists(): shutil.rmtree(out_fits)
+        out_fits.mkdir(parents=True)
+        if out_png.exists(): shutil.rmtree(out_png)
+        out_png.mkdir(parents=True)
+        
+        h_files = sorted(list(input_h.glob("*.fits")))
+        o_files_all = sorted(list(input_o.glob("*.fits")))
+        
+        if not h_files or not o_files_all:
+            print(f"❌ SALTATO: File mancanti in {target_dir.name}")
+            continue
+
+        h_master_path = h_files[0]
         try:
-            with fits.open(f) as o:
-                w = WCS(o[0].header)
-                dist = np.sqrt((w.wcs.crval[0]-h_center[0])**2 + (w.wcs.crval[1]-h_center[1])**2)
-                if dist < 0.1: 
-                    o_files_good.append(f)
-        except: pass
-        
-    print(f"   ✅ File validi: {len(o_files_good)}")
-    
-    if not o_files_good:
-        print("❌ Nessun file osservatorio centrato su Hubble.")
-        return
-
-    h_h, h_w = d_h.shape
-    tasks = []
-    for y in range(0, h_h - HR_SIZE + 1, STRIDE):
-        for x in range(0, h_w - HR_SIZE + 1, STRIDE):
-            tasks.append((h_master_path, y, x))
+            with fits.open(h_master_path) as h:
+                d_h = np.nan_to_num(h[0].data)
+                if d_h.ndim > 2: d_h = d_h[0]
+                w_h = WCS(h[0].header)
+                h_head = h[0].header
+                
+            h_scale = get_pixel_scale_deg(w_h)
+            h_fov_deg = h_scale * HR_SIZE
+            h_center = w_h.wcs.crval
             
-    print(f"   📦 Patch da processare: {len(tasks)}")
-    
-    print(f"\n🚀 Avvio estrazione...")
-    total_saved = 0
-    
-    with ProcessPoolExecutor(initializer=init_worker,
-                             initargs=(d_h, h_head, w_h, out_fits, out_png, h_fov_deg, o_files_good)) as ex:
-        
-        results = list(tqdm(ex.map(process_single_patch_multi, tasks), total=len(tasks), ncols=100))
-        total_saved = sum(results)
-        
-    print(f"\n✅ COMPLETATO.")
-    print(f"   Coppie salvate: {total_saved}")
-    print(f"   Dataset: {out_fits}")
-    print(f"   Debug: {out_png}")
+        except Exception as e:
+            print(f"❌ Errore lettura Hubble: {e}")
+            continue
 
-    target_name = target_dir.name
-    
-    zip_fits_name = target_dir / f"{target_name}_patches"
-    print(f"   🗜️  ZIP Dataset: {zip_fits_name}.zip")
-    shutil.make_archive(str(zip_fits_name), 'zip', str(out_fits))
-    
-    zip_png_name = target_dir / f"{target_name}_debug_visuals"
-    print(f"   🗜️  ZIP Debug: {zip_png_name}.zip")
-    shutil.make_archive(str(zip_png_name), 'zip', str(out_png))
+        o_files_good = []
+        for f in o_files_all:
+            try:
+                with fits.open(f) as o:
+                    w = WCS(o[0].header)
+                    dist = np.sqrt((w.wcs.crval[0]-h_center[0])**2 + (w.wcs.crval[1]-h_center[1])**2)
+                    if dist < 0.1: 
+                        o_files_good.append(f)
+            except: pass
+            
+        if not o_files_good:
+            print("❌ Nessun file osservatorio centrato su Hubble.")
+            continue
+
+        h_h, h_w = d_h.shape
+        tasks = []
+        
+        for y in range(0, h_h - HR_SIZE + 1, calculated_stride):
+            for x in range(0, h_w - HR_SIZE + 1, calculated_stride):
+                tasks.append((h_master_path, y, x))
+                
+        print(f"   ⚙️  Avvio estrazione...")
+        total_saved = 0
+        
+        with ProcessPoolExecutor(initializer=init_worker,
+                                 initargs=(d_h, h_head, w_h, out_fits, out_png, h_fov_deg, o_files_good)) as ex:
+            
+            results = list(tqdm(ex.map(process_single_patch_multi, tasks), total=len(tasks), ncols=100))
+            total_saved = sum(results)
+            
+        # Messaggio "✅ Salvate..." rimosso come richiesto
+
+        target_name = target_dir.name
+        zip_fits_name = target_dir / f"{target_name}_patches"
+        shutil.make_archive(str(zip_fits_name), 'zip', str(out_fits))
+        zip_png_name = target_dir / f"{target_name}_debug_visuals"
+        shutil.make_archive(str(zip_png_name), 'zip', str(out_png))
+        print(f"   🗜️  Archivi creati.")
+
+    print("\n🏁 TUTTE LE OPERAZIONI COMPLETATE.")
 
 if __name__ == "__main__":
     main()
