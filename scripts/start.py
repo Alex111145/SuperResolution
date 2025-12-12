@@ -6,14 +6,20 @@ import torch
 from pathlib import Path
 
 # Configurazione Base
-PROJECT_ROOT = Path("/root/SuperResolution")
+# --- CORREZIONE APPLICATA QUI ---
+# Usiamo il percorso relativo allo script per trovare la root del progetto,
+# eliminando la dipendenza da /root (che causava PermissionError per gfrattini).
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = PROJECT_ROOT / "data"
 SCRIPT_PATH = PROJECT_ROOT / "scripts" / "train_core.py"
+# --------------------------------
 
 def clear_screen():
     os.system('cls' if os.name == 'nt' else 'clear')
 
 def get_available_targets():
+    # Ora DATA_DIR punta a /home/gfrattini/SuperResolution/data,
+    # risolvendo il PermissionError
     if not DATA_DIR.exists():
         return []
     return [d.name for d in DATA_DIR.iterdir() if d.is_dir()]
@@ -30,18 +36,24 @@ def get_available_gpus():
 def main():
     clear_screen()
     print("==========================================")
-    print("      🚀 SUPER RESOLUTION LAUNCHER        ")
+    print("      🚀 SUPER RESOLUTION LAUNCHER        ")
     print("==========================================\n")
 
     # 1. SELEZIONE TARGET
-    targets = get_available_targets()
+    try:
+        targets = get_available_targets()
+    except PermissionError as e:
+        print(f"❌ Errore di Permessi: {e}")
+        print("Assicurati che la directory 'data' esista e sia accessibile.")
+        sys.exit(1)
+        
     if not targets:
-        print("❌ Nessun target trovato in /data!")
+        print(f"❌ Nessun target trovato in {DATA_DIR}!")
         sys.exit(1)
     
     print("📂 Target disponibili:")
     for idx, t in enumerate(targets):
-        print(f"   [{idx}] {t}")
+        print(f"   [{idx}] {t}")
     
     while True:
         try:
@@ -60,11 +72,11 @@ def main():
     gpus = get_available_gpus()
     print("🎮 GPU Disponibili:")
     for g in gpus:
-        print(f"   {g}")
+        print(f"   {g}")
     
     print("\nOpzioni:")
-    print("   [a] Usa TUTTE le GPU")
-    print("   [0,1] Inserisci ID separati da virgola (es. 0,2)")
+    print("   [a] Usa TUTTE le GPU")
+    print("   [0,1] Inserisci ID separati da virgola (es. 0,2)")
     
     gpu_env_string = ""
     nproc = 0
