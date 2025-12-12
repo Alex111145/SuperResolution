@@ -1,36 +1,44 @@
-# --- Index per PyTorch con CUDA ---
---extra-index-url https://download.pytorch.org/whl/cu118
-
-# --- Core & Data Science ---
-numpy<2.0
-pandas
-scipy
-matplotlib
-pyyaml
-future
-
-# --- Image Processing ---
-scikit-image
-opencv-python
-Pillow
-
-# --- Astronomy Specific ---
-astropy
-reproject
-astroalign
-
-# --- Deep Learning (PyTorch & Tools) ---
-torch>=2.0.0
-torchvision
-torchaudio
-tensorboard
-einops
-timm
-# AGGIUNTA FONDAMENTALE PER SWINIR:
-basicsr>=1.4.2
-
-# --- Utilities & Data Management ---
-tqdm
-lmdb
-addict
-yapf
+pip install \
+    # --- Index per PyTorch con CUDA 11.8 (Fondamentale per Windows/Linux con GPU NVIDIA) ---
+    --extra-index-url https://download.pytorch.org/whl/cu118 \
+    \
+    # --- Core & Data Science ---
+    'numpy<2.0' \
+    pandas \
+    scipy \
+    matplotlib \
+    pyyaml \
+    future \
+    \
+    # --- Image Processing ---
+    scikit-image \
+    opencv-python \
+    Pillow \
+    \
+    # --- Astronomy Specific ---
+    astropy \
+    reproject \
+    astroalign \
+    \
+    # --- Deep Learning (PyTorch & Tools) ---
+    'torch>=2.0.0' \
+    torchvision \
+    torchaudio \
+    tensorboard \
+    einops \
+    timm \
+    \
+    # --- SwinIR Dependencies ---
+    'basicsr>=1.4.2' \
+    \
+    # --- Metrics (Aggiunto per FSIM) ---
+    piq \
+    \
+    # --- Utilities & Data Management ---
+    tqdm \
+    lmdb \
+    addict \
+    yapf \
+    
+# Re-installa o conferma l'installazione di tensorboard (già incluso sopra, ma per completezza)
+pip install tensorboard
