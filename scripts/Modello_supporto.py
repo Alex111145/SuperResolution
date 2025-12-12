@@ -27,10 +27,10 @@ except ImportError as e:
 
 # ================= HYPERPARAMETERS TRAINING (FIX STABILITÀ GTX/RTX) =================
 
-BATCH_SIZE = 2        # Basso per evitare OOM e instabilità
+BATCH_SIZE = 5        # Basso per evitare OOM e instabilità
 ACCUM_STEPS = 16      # 2 * 16 = 32 (Batch Size Effettivo simulato)
 LR = 2e-4             
-TOTAL_EPOCHS = 100    
+TOTAL_EPOCHS = 500    
 
 LOG_INTERVAL = 1      
 IMAGE_INTERVAL = 10   
