@@ -1,6 +1,17 @@
 import sys
 import os
 from pathlib import Path
+import torchvision
+
+# --- FIX CRITICO PER BASICSR / TORCHVISION RECENTE ---
+# BasicSR cerca 'functional_tensor' che è stato rimosso in torchvision >= 0.15.
+# Creiamo un alias al volo per evitare il crash "No module named...".
+try:
+    from torchvision.transforms import functional_tensor
+except ImportError:
+    import torchvision.transforms.functional as F
+    sys.modules["torchvision.transforms.functional_tensor"] = F
+# -----------------------------------------------------
 
 def setup_paths():
     # Calcola la root: .../SuperResolution/
@@ -23,7 +34,8 @@ def setup_paths():
                 sys.path.insert(0, str_p)
                 print(f"   ✅ Aggiunto al path: {p.name}")
         else:
-            print(f"   ⚠️ ATTENZIONE: Percorso non trovato: {p}")
+            # Non è un errore critico se installato via pip, ma lo segnaliamo
+            pass 
 
 # Esegui subito il setup quando importato
 setup_paths()
@@ -41,6 +53,7 @@ def import_external_archs():
     except ImportError as e:
         print(f"   ❌ Errore import SwinIR: {e}")
         print("      Assicurati di aver installato: pip install basicsr")
+        print("      E che il fix 'functional_tensor' in env_setup.py sia attivo.")
 
     # Restituiamo None per RRDBNet/HAT perché non li usiamo più
     return None, None, SwinIR
