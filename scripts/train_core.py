@@ -33,8 +33,8 @@ except ImportError as e:
 
 # === HYPERPARAMETERS ===
 BATCH_SIZE = 1      
-ACCUM_STEPS = 4       # Accumulo gradienti per simulare batch più grandi
-LR = 1e-4             # Learning Rate conservativo
+ACCUM_STEPS = 4       # Accumulo gradienti
+LR = 1e-4             # Learning Rate
 TOTAL_EPOCHS = 500  
 LOG_INTERVAL = 5    
 IMAGE_INTERVAL = 10   
@@ -59,11 +59,10 @@ def train_worker():
 
     # Parsing Argomenti
     parser = argparse.ArgumentParser()
-    parser.add_argument('--target', type=str, required=True, help="Nome target (o lista separata da virgole)")
+    parser.add_argument('--target', type=str, required=True, help="Nome target")
     args = parser.parse_args()
 
     # --- GESTIONE MULTI-TARGET ---
-    # Permette di passare "M33,M42" e aggregare i dataset
     target_names = [t.strip() for t in args.target.split(',') if t.strip()]
     target_output_name = "_".join(target_names)
 
@@ -72,20 +71,20 @@ def train_worker():
     save_dir = out_dir / "checkpoints"
     img_dir = out_dir / "images"
     log_dir = out_dir / "tensorboard"
-    splits_dir_temp = out_dir / "temp_splits" # Usiamo una cartella temp per non sporcare i dati
+    splits_dir_temp = out_dir / "temp_splits"
 
-    # File Checkpoint per Resume Completo
+    # File Checkpoint
     latest_ckpt_path = save_dir / "latest_checkpoint.pth"
+    best_weights_path = save_dir / "best_train_model.pth"
 
     if is_master:
         for d in [save_dir, img_dir, log_dir, splits_dir_temp]: d.mkdir(parents=True, exist_ok=True)
         writer = SummaryWriter(str(log_dir))
-        print(f"🚀 [Master] Avvio Training Robusto su: {target_output_name} | GPUs: {world_size}")
+        print(f"🚀 [Master] Training su: {target_output_name} | GPUs: {world_size}")
 
-    dist.barrier() # Sincronizzazione processi
+    dist.barrier() 
 
     # --- AGGREGAZIONE DATASET ---
-    # Se rank 0 o tutti, dobbiamo generare i JSON temporanei per il DDP
     all_train_data = []
     all_val_data = []
     
@@ -97,7 +96,7 @@ def train_worker():
         except FileNotFoundError:
             if is_master: print(f"⚠️ Dati non trovati per {t_name}, salto.")
 
-    # Scrittura JSON temporanei per ogni rank (per evitare race conditions su file system)
+    # Scrittura JSON temporanei
     ft_path = splits_dir_temp / f"temp_train_r{rank}.json"
     fv_path = splits_dir_temp / f"temp_val_r{rank}.json"
     with open(ft_path, 'w') as f: json.dump(all_train_data, f)
@@ -122,21 +121,20 @@ def train_worker():
     optimizer = optim.AdamW(model.parameters(), lr=LR, weight_decay=1e-4)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=TOTAL_EPOCHS, eta_min=1e-7)
     scaler = torch.amp.GradScaler('cuda')
-    criterion = TrainStarLoss(vgg_weight=0.05).to(device) # Peso VGG ridotto come richiesto
+    criterion = TrainStarLoss(vgg_weight=0.05).to(device) 
 
-    # --- LOGICA RESUME (CRUCIALE) ---
+    # ==========================================================================
+    # --- LOGICA RESUME AUTOMATICA ---
+    # ==========================================================================
     start_epoch = 1
     best_psnr = 0.0
-    
-    # Mappa per caricare sulla GPU corretta
     map_location = {'cuda:%d' % 0: 'cuda:%d' % local_rank}
 
+    # Controllo presenza checkpoint completo (Resume Standard)
     if latest_ckpt_path.exists():
         if is_master: print(f"🔄 Trovato checkpoint completo: {latest_ckpt_path.name}")
         try:
             checkpoint = torch.load(latest_ckpt_path, map_location=map_location)
-            
-            # Ripristino completo
             model.module.load_state_dict(checkpoint['model_state_dict'])
             optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
             scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
@@ -145,18 +143,24 @@ def train_worker():
             start_epoch = checkpoint['epoch'] + 1
             best_psnr = checkpoint.get('best_psnr', 0.0)
             
-            if is_master: print(f"✅ Ripresa training dall'epoca {start_epoch} (Best PSNR prec: {best_psnr:.2f})")
+            if is_master: print(f"✅ Resume automatico da Epoca {start_epoch} (Best PSNR: {best_psnr:.2f})")
         except Exception as e:
-            if is_master: print(f"❌ Errore caricamento checkpoint: {e}. Si riparte da zero.")
-    else:
-        # Fallback: se non c'è il "latest", prova a vedere se c'è almeno il "best" (solo pesi)
-        best_ckpt = save_dir / "best_train_model.pth"
-        if best_ckpt.exists():
-            if is_master: print("⚠️ Trovato solo 'best_train_model.pth' (solo pesi). Carico quello ma resetto optimizer.")
-            state_dict = torch.load(best_ckpt, map_location=map_location)
+            if is_master: print(f"❌ Errore critico nel checkpoint: {e}. Si riparte da zero.")
+    
+    # Fallback: Se non c'è il resume completo, controlliamo se esistono pesi 'best' 
+    # per fare un warm-start (ma ripartendo da epoca 1)
+    elif best_weights_path.exists():
+        if is_master: print("⚠️ Nessun resume completo, ma trovati pesi 'best'. Carico pesi e riparto da Epoca 1.")
+        try:
+            state_dict = torch.load(best_weights_path, map_location=map_location)
             model.module.load_state_dict(state_dict)
-        elif is_master:
-            print("✨ Nessun checkpoint trovato. Inizio training da zero.")
+        except Exception as e:
+            if is_master: print(f"❌ Errore caricamento pesi best: {e}")
+            
+    elif is_master:
+        print("✨ Nessun checkpoint trovato. Inizio training da zero.")
+    # ==========================================================================
+
 
     # === TRAINING LOOP ===
     for epoch in range(start_epoch, TOTAL_EPOCHS + 1):
@@ -171,24 +175,20 @@ def train_worker():
             lr_img = batch['lr'].to(device, non_blocking=True)
             hr_img = batch['hr'].to(device, non_blocking=True)
             
-            # Forward & Loss
             with torch.amp.autocast('cuda'):
                 pred = model(lr_img)
                 loss, _ = criterion(pred, hr_img)
                 loss = loss / ACCUM_STEPS 
             
-            # Check NaN/Inf
             if torch.isnan(loss) or torch.isinf(loss):
-                if is_master: print(f"⚠️ Warning: NaN Loss allo step {i}. Salto batch.")
+                if is_master: print(f"⚠️ NaN Loss step {i}")
                 optimizer.zero_grad()
                 continue
 
             scaler.scale(loss).backward()
             
-            # Optimizer Step (con accumulo)
             if (i + 1) % ACCUM_STEPS == 0:
                 scaler.unscale_(optimizer)
-                # Clip gradiente più aggressivo (0.5) come richiesto
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
                 scaler.step(optimizer)
                 scaler.update()
@@ -199,34 +199,28 @@ def train_worker():
 
         scheduler.step()
         
-        # --- VALIDAZIONE & SALVATAGGIO ---
+        # --- VALIDAZIONE ---
         if epoch % LOG_INTERVAL == 0 or epoch == TOTAL_EPOCHS:
             dist.barrier()
             
-            # Aggrega Loss
             loss_tensor = torch.tensor(acc_loss, device=device)
             dist.all_reduce(loss_tensor, op=dist.ReduceOp.SUM)
             avg_loss = loss_tensor.item() / (len(train_loader) * world_size)
 
-            # Validazione
             model.eval()
             local_metrics = TrainMetrics()
             
-            # Solo master visualizza barra progresso val
             val_iter = tqdm(val_loader, desc="Val", ncols=50, leave=False) if is_master else val_loader
 
             with torch.inference_mode():
                 for v_batch in val_iter:
                     v_lr = v_batch['lr'].to(device)
                     v_hr = v_batch['hr'].to(device)
-                    
                     with torch.amp.autocast('cuda'):
                         v_pred = model(v_lr)
-                    
                     v_pred = torch.nan_to_num(v_pred)
                     local_metrics.update(v_pred.float(), v_hr.float())
             
-            # Aggrega Metriche
             total_psnr = torch.tensor(local_metrics.psnr, device=device)
             total_count = torch.tensor(local_metrics.count, device=device)
             dist.all_reduce(total_psnr, op=dist.ReduceOp.SUM)
@@ -238,19 +232,17 @@ def train_worker():
                 writer.add_scalar('Val/PSNR', global_psnr, epoch)
                 print(f" Ep {epoch:04d} | Loss: {avg_loss:.4f} | PSNR: {global_psnr:.2f} dB")
 
-                # Salva Best Model (solo pesi, per inferenza leggera)
                 if global_psnr > best_psnr:
                     best_psnr = global_psnr
                     print("   🏆 Nuovo Best PSNR!")
                     torch.save(model.module.state_dict(), save_dir / "best_train_model.pth")
                 
-                # Visualizzazione immagini
                 if epoch % IMAGE_INTERVAL == 0:
                     v_lr_up = torch.nn.functional.interpolate(v_lr, size=(512,512), mode='nearest')
                     comp = torch.cat((v_lr_up, v_pred, v_hr), dim=3).clamp(0,1)
                     vutils.save_image(comp, img_dir / f"train_epoch_{epoch}.png")
 
-        # --- SALVATAGGIO CHECKPOINT "RESUME" (Ogni Epoca) ---
+        # --- SALVATAGGIO CHECKPOINT AUTOMATICO (Ogni Epoca) ---
         if is_master:
             checkpoint_dict = {
                 'epoch': epoch,
@@ -265,7 +257,6 @@ def train_worker():
         dist.barrier()
         model.train()
 
-    # Pulizia file temp
     if is_master:
         try:
             if ft_path.exists(): ft_path.unlink()
@@ -275,5 +266,4 @@ def train_worker():
     cleanup()
 
 if __name__ == "__main__":
-    # Questo script viene chiamato da start.py tramite torchrun
     train_worker()
