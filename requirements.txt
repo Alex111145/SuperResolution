@@ -1,0 +1,38 @@
+# PyTorch e CUDA
+--extra-index-url https://download.pytorch.org/whl/cu118
+torch>=2.0.0
+torchvision
+torchaudio
+
+# Fix Compatibilità Python 3.8 (Versione specifica funzionante)
+typing-extensions==4.12.2
+
+# Architetture e Modelli
+basicsr
+einops
+timm
+addict
+
+# Data Processing & Imaging
+numpy<2.0
+opencv-python
+Pillow
+scikit-image
+scipy
+
+# Astrofisica
+astropy
+astroalign
+reproject
+
+# Training Utility & Logging
+tqdm
+pyyaml
+tensorboard
+nvitop
+pandas
+
+# Varie
+matplotlib
+lmdb
+yapf
