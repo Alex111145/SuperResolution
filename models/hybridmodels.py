@@ -1,29 +1,22 @@
 import sys
 import os
 from pathlib import Path
-
-import torchvision.transforms.functional as TF_functional
-sys.modules['torchvision.transforms.functional_tensor'] = TF_functional
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torchvision.transforms.functional as TF_functional
+
+sys.modules['torchvision.transforms.functional_tensor'] = TF_functional
 
 CURRENT_DIR = Path(__file__).resolve().parent
 HAT_ARCH_PATH = CURRENT_DIR / "hat_arch"
 
 if HAT_ARCH_PATH.exists():
     sys.path.insert(0, str(HAT_ARCH_PATH))
- 
 else:
     raise FileNotFoundError(f"Cartella HAT non trovata: {HAT_ARCH_PATH}")
 
-try:
-    from hat_arch import HAT
-
-except ImportError as e:
-    raise ImportError(f"Impossibile importare HAT: {e}")
-
+from hat_arch import HAT
 
 class ResidualDenseBlock(nn.Module):
     def __init__(self, num_feat=64, num_grow_ch=32):
@@ -68,14 +61,14 @@ class RRDBBlock(nn.Module):
 class HybridHATRealESRGAN(nn.Module):
     def __init__(
         self,
-        img_size,
-        depths,
-        num_heads,
-        window_size,
-        num_rrdb,
+        img_size=128,
         in_chans=1,
         embed_dim=180,
+        depths=(6, 6, 6, 6, 6, 6),
+        num_heads=(6, 6, 6, 6, 6, 6),
+        window_size=8,
         upscale=4,
+        num_rrdb=23,
         num_feat=64,
         num_grow_ch=32
     ):
@@ -91,7 +84,7 @@ class HybridHATRealESRGAN(nn.Module):
             depths=depths,
             num_heads=num_heads,
             window_size=window_size,
-            upscale=2, 
+            upscale=2,
             upsampler='pixelshuffle',
             img_range=1.0,
             resi_connection='1conv'
@@ -145,6 +138,6 @@ class HybridHATRealESRGAN(nn.Module):
             
             hat_state_cleaned = {k.replace('module.', ''): v for k, v in hat_state.items()}
             self.hat.load_state_dict(hat_state_cleaned, strict=False)
-            print(f"✓ HAT pre-trained caricato da {hat_path}")
+            print(f" HAT pre-trained caricato da {hat_path}")
         except Exception as e:
-            print(f"⚠️  Errore caricamento HAT pre-trained: {e}")
+            print(f"  Errore caricamento HAT pre-trained: {e}")
