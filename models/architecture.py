@@ -178,7 +178,7 @@ class Upsample(nn.Sequential):
     """
     def __init__(self, scale, num_feat):
         m = []
-        if (scale & (scale - 1)) == 0:  # Scale 2, 4, 8...
+        if (scale & (scale - 1)) == 0: 
             for _ in range(int(math.log(scale, 2))):
                 m.append(nn.Conv2d(num_feat, 4 * num_feat, 3, 1, 1))
                 m.append(nn.PixelShuffle(2))

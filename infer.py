@@ -30,14 +30,14 @@ except ImportError as e:
 torch.backends.cudnn.benchmark = True
 
 def save_as_tiff16(tensor, path):
-    """Salva il tensore come immagine TIFF a 16-bit."""
+   
     arr = tensor.squeeze().float().cpu().numpy()
     arr = np.clip(arr, 0, 1)
     arr_u16 = (arr * 65535).astype(np.uint16)
     Image.fromarray(arr_u16, mode='I;16').save(path)
 
 def detect_model_params(state_dict):
-    """Tenta di dedurre i parametri del modello dal state_dict."""
+   
     params = {'embed_dim': 96, 'depths': [6, 6, 6, 6], 'num_heads': [6, 6, 6, 6]}
     if 'conv_first.weight' in state_dict:
         params['embed_dim'] = state_dict['conv_first.weight'].shape[0]

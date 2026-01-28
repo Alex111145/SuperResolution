@@ -4,10 +4,7 @@ import torchvision.models as models
 import torch.nn.functional as F
 
 class VGGLoss(nn.Module):
-    """
-    Calcola la Loss Percettiva usando una VGG19 pre-addestrata.
-    Gestisce automaticamente l'adattamento da 1 canale (Grayscale) a 3 canali (RGB).
-    """
+ 
     def __init__(self, feature_layer=35, use_input_norm=True, use_range_norm=False):
         super(VGGLoss, self).__init__()
 
@@ -43,7 +40,7 @@ class VGGLoss(nn.Module):
         return F.l1_loss(x_feat, y_feat.detach())
 
 class CharbonnierLoss(nn.Module):
-    """Charbonnier Loss (L1 robusta) usata spesso con SwinIR."""
+  
     def __init__(self, eps=1e-6):
         super(CharbonnierLoss, self).__init__()
         self.eps = eps

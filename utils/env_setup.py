@@ -28,7 +28,7 @@ def setup_paths():
 setup_paths()
 
 def import_external_archs():
-    """Tenta di importare solo le architetture effettivamente necessarie."""
+
     print("Importazione Moduli Esterni...")
     
     RRDBNet = None

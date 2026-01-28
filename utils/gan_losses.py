@@ -42,9 +42,7 @@ class RelativeGANLoss(nn.Module):
                     self.loss(real_pred - torch.mean(fake_pred), torch.zeros_like(real_pred))) / 2
 
 class TextureLoss(nn.Module):
-    """
-    Texture/Style Loss corretta basata su Gram Matrix.
-    """
+  
     def __init__(self):
         super().__init__()
     

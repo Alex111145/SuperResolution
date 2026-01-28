@@ -125,7 +125,7 @@ def main():
     print(f"\nGPU Selezionate: {gpu_env_string} (Totale processi: {nproc})")
     
     print("\n==========================================")
-    print("   Avvio Training DDP (Dataset Aggregato)...")
+    print("   Avvio Training ...")
     print("==========================================\n")
 
     env = os.environ.copy()

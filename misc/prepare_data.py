@@ -11,10 +11,7 @@ TRAIN_RATIO = 0.8
 VAL_RATIO = 0.1
 
 def prepare_full_dataset(target_dir_path):
-    """
-    Trova tutte le coppie di patch in un target, le mescola e le divide in 
-    set di Train, Validation e Test, salvando gli elenchi in file JSON.
-    """
+ 
     target_dir = Path(target_dir_path)
     print(f"\nPREPARAZIONE DATASET COMPLETO (TRAIN): {target_dir.name}")
     
@@ -69,10 +66,7 @@ def prepare_full_dataset(target_dir_path):
     print("-" * 40)
 
 def select_target_directories(required_subdir='7_dataset_ready'):
-    """
-    Consente la selezione di una, più o tutte le directory target 
-    che contengono la sottocartella dati necessaria.
-    """
+ 
     all_subdirs = [d for d in ROOT_DATA_DIR.iterdir() if d.is_dir() and d.name not in ['splits', 'logs']]
     
     valid_subdirs = []
@@ -119,7 +113,7 @@ def select_target_directories(required_subdir='7_dataset_ready'):
         return []
 
 def main():
-    """Funzione di controllo che gestisce l'input e itera sui target."""
+
     
     if len(sys.argv) > 1: 
         target_dirs = [Path(sys.argv[1])]
